@@ -1,0 +1,29 @@
+# Normalize text in the repository; keep platform-specific outputs consistent.
+* text=auto
+
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.xml text eol=lf
+*.swift text eol=lf
+*.kt text eol=lf
+*.kts text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.gradle text eol=lf
+*.pbxproj text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary artifacts and document fixtures must not be line-ending converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.notebook binary
+*.zip binary
+*.jar binary
