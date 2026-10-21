@@ -1,4 +1,4 @@
-# Notebook App — UI/UX Design System & Interaction Specification V0.3
+# Notebook App - UI/UX Design System & Interaction Specification V0.3
 
 **Date:** 2026-10-21  
 **Status:** Planning draft; only entries marked **Confirmed** are approved product requirements  
