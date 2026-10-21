@@ -1,0 +1,58 @@
+# Operating systems and editors
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# Secrets and local environment (do not commit private keys or signing materials)
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.mobileprovision
+*.keystore
+*.jks
+*.pem
+*.key
+
+# Xcode / Swift (keep source, project files, and lockfiles tracked)
+DerivedData/
+.build/
+.swiftpm/xcode/package.xcworkspace/
+xcuserdata/
+*.xcuserstate
+*.ipa
+*.dSYM/
+*.dSYM.zip
+
+# Android Studio / Gradle
+.gradle/
+.kotlin/
+**/build/
+local.properties
+captures/
+.cxx/
+.externalNativeBuild/
+*.apk
+*.aab
+*.hprof
+
+# Python tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local scratch files
+*.tmp
+*.log
