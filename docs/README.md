@@ -1,4 +1,4 @@
-# Notebook App — Documentation Index
+# Notebook App - Documentation Index
 
 These files are the planning baseline for the native iPadOS and Android Notebook App.
 They describe intended V1 behavior and architecture; **they do not certify that any
