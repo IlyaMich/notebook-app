@@ -1,0 +1,135 @@
+{
+  "description": "FMT-03 synthetic fixture contract; messages are Python-validator-specific",
+  "invalid": [
+    {
+      "error_contains": "Unsafe ZIP member",
+      "path": "invalid/traversal_member.notebook",
+      "reason": "ZIP entry escapes the package root"
+    },
+    {
+      "error_contains": "Unsafe ZIP member",
+      "path": "invalid/absolute_path_member.notebook",
+      "reason": "ZIP entry uses an absolute path"
+    },
+    {
+      "error_contains": "Duplicate ZIP member",
+      "path": "invalid/duplicate_zip_member.notebook",
+      "reason": "Two ZIP entries have the same name"
+    },
+    {
+      "error_contains": "ZIP symlink is forbidden",
+      "path": "invalid/symlink_member.notebook",
+      "reason": "ZIP member is a symbolic link"
+    },
+    {
+      "error_contains": "Missing manifest.json",
+      "path": "invalid/missing_manifest.notebook",
+      "reason": "Required manifest is absent"
+    },
+    {
+      "error_contains": "Unsupported schemaVersion",
+      "path": "invalid/unsupported_schema_version.notebook",
+      "reason": "Unknown wire version must not be accepted"
+    },
+    {
+      "error_contains": "Missing referenced page",
+      "path": "invalid/missing_page.notebook",
+      "reason": "Manifest references an absent page JSON file"
+    },
+    {
+      "error_contains": "Duplicate JSON key",
+      "path": "invalid/duplicate_manifest_json_key.notebook",
+      "reason": "Manifest contains ambiguous duplicate object key"
+    },
+    {
+      "error_contains": "Schema violation",
+      "path": "invalid/negative_page_width.notebook",
+      "reason": "Page width must be positive"
+    },
+    {
+      "error_contains": "Schema violation",
+      "path": "invalid/unknown_element_type.notebook",
+      "reason": "Unknown required element type must not be dropped"
+    },
+    {
+      "error_contains": "Duplicate element ID",
+      "path": "invalid/duplicate_element_id.notebook",
+      "reason": "Element identity must be unique throughout a note"
+    },
+    {
+      "error_contains": "Singular or unstable transform",
+      "path": "invalid/singular_transform.notebook",
+      "reason": "Element transformation is noninvertible"
+    },
+    {
+      "error_contains": "Non-monotonic stroke tMs",
+      "path": "invalid/nonmonotonic_stroke_time.notebook",
+      "reason": "Stroke sample timestamps must not go backwards"
+    },
+    {
+      "error_contains": "Image crop exceeds normalized bounds",
+      "path": "invalid/out_of_bounds_image_crop.notebook",
+      "reason": "Normalized crop spills outside the source image"
+    },
+    {
+      "error_contains": "Image references missing/non-image asset",
+      "path": "invalid/missing_image_asset_reference.notebook",
+      "reason": "Image element references an unknown asset ID"
+    },
+    {
+      "error_contains": "PDF background references missing/non-PDF asset",
+      "path": "invalid/wrong_pdf_background_asset.notebook",
+      "reason": "PDF page uses a PNG asset ID"
+    },
+    {
+      "error_contains": "Asset SHA-256 mismatch",
+      "path": "invalid/altered_png_bytes.notebook",
+      "reason": "Asset bytes must match the manifest hash"
+    },
+    {
+      "error_contains": "Asset byteLength mismatch",
+      "path": "invalid/incorrect_asset_length.notebook",
+      "reason": "Manifest byte count must match asset content"
+    },
+    {
+      "error_contains": "Missing asset file",
+      "path": "invalid/missing_asset_member.notebook",
+      "reason": "Manifest declares an asset not in the ZIP"
+    },
+    {
+      "error_contains": "Duplicate asset ID or path",
+      "path": "invalid/duplicate_asset_id.notebook",
+      "reason": "Assets must have unique IDs"
+    },
+    {
+      "error_contains": "createdAt must not be later",
+      "path": "invalid/creation_after_modification.notebook",
+      "reason": "Creation timestamp cannot follow modification timestamp"
+    },
+    {
+      "error_contains": "createdAt must be UTC",
+      "path": "invalid/non_utc_timestamp.notebook",
+      "reason": "Portable timestamps must have UTC offsets"
+    },
+    {
+      "error_contains": "Unlisted archive member",
+      "path": "invalid/unlisted_archive_member.notebook",
+      "reason": "Package contains a file not listed in its manifest"
+    },
+    {
+      "error_contains": "Page ID mismatch",
+      "path": "invalid/page_id_mismatch.notebook",
+      "reason": "Page JSON ID must agree with manifest reference"
+    }
+  ],
+  "valid": [
+    {
+      "path": "valid/empty_page_v1.notebook",
+      "reason": "One blank page, no elements or assets, equal UTC creation/update times"
+    },
+    {
+      "path": "valid/single_point_stroke_v1.notebook",
+      "reason": "One-point stroke, zero opacity, reflection transform and dotted paper"
+    }
+  ]
+}
