@@ -27,6 +27,10 @@ interface NotebookDao {
     @Query("SELECT * FROM notebooks WHERE parent_folder_id IS :parentId AND deleted_at IS NULL ORDER BY sort_order ASC, id ASC")
     suspend fun listActiveByParent(parentId: String?): List<NotebookEntity>
 
+    /** Nullable maximum: no active siblings returns null; order is 0-based. */
+    @Query("SELECT MAX(sort_order) FROM notebooks WHERE parent_folder_id IS :parentId AND deleted_at IS NULL")
+    suspend fun maxActiveSortOrder(parentId: String?): Long?
+
     @Query("SELECT COUNT(*) FROM notebooks")
     suspend fun countAll(): Int
 }
