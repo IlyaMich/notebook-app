@@ -1,8 +1,10 @@
-"""FMT-02 checkpoint 2: safe ZIP/package preflight (not full schema validation)."""
+"""FMT-02: safe .notebook preflight, draft schema, and semantic checks."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+from datetime import datetime, timedelta
 import json
 import math
 import re
@@ -117,6 +119,8 @@ def preflight_notebook(archive: Path) -> dict[str, Any]:
 # incrementally in subsequent FMT-02 checkpoints.
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "notebook_schema_v1_draft.json"
 MAX_PAGE_JSON_BYTES = 16 * 1024 * 1024  # Provisional; benchmark before release.
+MAX_ELEMENTS_PER_PAGE = 20_000  # Provisional, pending benchmark.
+MAX_STROKE_POINTS = 100_000  # Provisional, pending benchmark.
 
 
 def _finite_float(value: str) -> float:
@@ -148,11 +152,104 @@ def _schema_check(validator: Draft202012Validator, document: dict[str, Any], lab
         raise NotebookValidationError(f"Schema violation in {label} at {location}: {error.message}")
 
 
-def validate_notebook(archive: Path) -> dict[str, Any]:
-    """Validate archive preflight and draft manifest/page schemas.
+def _validate_timestamps(manifest: dict[str, Any]) -> None:
+    parsed = []
+    for field in ("createdAt", "updatedAt"):
+        try:
+            stamp = datetime.fromisoformat(manifest[field].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise NotebookValidationError(f"Invalid {field} timestamp") from exc
+        # JSON Schema permits nonzero offsets; portable metadata requires UTC.
+        if stamp.tzinfo is None or stamp.utcoffset() != timedelta(0):
+            raise NotebookValidationError(f"{field} must be UTC")
+        parsed.append(stamp)
+    if parsed[0] > parsed[1]:
+        raise NotebookValidationError("createdAt must not be later than updatedAt")
 
-    This is NOT full semantic validation of assets, references or geometry.
-    Returns the manifest only if the checks completed successfully.
+
+def _validate_transform(transform: list[float], element_id: str) -> None:
+    a, b, c, d, _, _ = transform
+    determinant = a * d - b * c
+    if determinant == 0 or not math.isfinite(determinant):
+        raise NotebookValidationError(f"Singular or unstable transform: {element_id}")
+
+
+def _verify_asset_bytes(package: zipfile.ZipFile, asset: dict[str, Any]) -> None:
+    expected_extension = {"image/png": ".png", "image/jpeg": ".jpg", "application/pdf": ".pdf"}
+    extension = expected_extension[asset["mimeType"]]
+    path = asset["path"]
+    if path.casefold() != f"assets/{asset['sha256'].lower()}{extension}":
+        raise NotebookValidationError(f"Asset path does not match hash and MIME: {path}")
+    try:
+        info = package.getinfo(path)
+    except KeyError as exc:
+        raise NotebookValidationError(f"Missing asset file: {path}") from exc
+    if info.file_size != asset["byteLength"]:
+        raise NotebookValidationError(f"Asset byteLength mismatch: {path}")
+
+    digest = hashlib.sha256()
+    signature = b""
+    # Stream assets to avoid loading images/PDFs into memory.
+    with package.open(info) as source:
+        while chunk := source.read(64 * 1024):
+            if len(signature) < 8:
+                signature = (signature + chunk)[:8]
+            digest.update(chunk)
+    if digest.hexdigest() != asset["sha256"].lower():
+        raise NotebookValidationError(f"Asset SHA-256 mismatch: {path}")
+    prefixes = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff",
+                "application/pdf": b"%PDF-"}
+    if not signature.startswith(prefixes[asset["mimeType"]]):
+        raise NotebookValidationError(f"Asset MIME/signature mismatch: {path}")
+
+
+def _validate_page_semantics(
+    page: dict[str, Any], assets_by_id: dict[str, dict[str, Any]], seen_element_ids: set[str]
+) -> None:
+    page_id = page["id"]
+    if len(page["elements"]) > MAX_ELEMENTS_PER_PAGE:
+        raise NotebookValidationError(f"Too many elements on page {page_id}")
+
+    background = page["background"]
+    if background["type"] == "pdfPage":
+        asset = assets_by_id.get(background["assetId"].casefold())
+        if asset is None or asset["mimeType"] != "application/pdf":
+            raise NotebookValidationError(f"PDF background references missing/non-PDF asset: {page_id}")
+        # Full PDF parsing and pageIndex verification remain a separate checkpoint.
+
+    for element in page["elements"]:
+        element_id = element["id"]
+        key = element_id.casefold()
+        if key in seen_element_ids:
+            raise NotebookValidationError(f"Duplicate element ID: {element_id}")
+        seen_element_ids.add(key)
+        _validate_transform(element["transform"], element_id)
+
+        payload = element["payload"]
+        if element["type"] == "stroke":
+            points = payload["points"]
+            if len(points) > MAX_STROKE_POINTS:
+                raise NotebookValidationError(f"Too many stroke points: {element_id}")
+            last_time = -1
+            for point in points:
+                if point["tMs"] < last_time:
+                    raise NotebookValidationError(f"Non-monotonic stroke tMs: {element_id}")
+                last_time = point["tMs"]
+        elif element["type"] == "image":
+            asset = assets_by_id.get(payload["assetId"].casefold())
+            if asset is None or asset["mimeType"] not in ("image/png", "image/jpeg"):
+                raise NotebookValidationError(f"Image references missing/non-image asset: {element_id}")
+            crop = payload.get("crop")
+            if crop is not None and (crop["x"] + crop["width"] > 1 or
+                                     crop["y"] + crop["height"] > 1):
+                raise NotebookValidationError(f"Image crop exceeds normalized bounds: {element_id}")
+
+
+def validate_notebook(archive: Path) -> dict[str, Any]:
+    """Validate the draft schema and implemented semantic invariants.
+
+    Returns manifest after validation. NOT a production-ready security boundary:
+    embedded image/PDF decoding and PDF page-index checks are deferred.
     """
     preflight_notebook(archive)
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -164,12 +261,44 @@ def validate_notebook(archive: Path) -> dict[str, Any]:
         with zipfile.ZipFile(archive) as package:
             manifest = _read_json_member(package, "manifest.json", MAX_MANIFEST_BYTES)
             _schema_check(validator, manifest, "manifest.json")
+            _validate_timestamps(manifest)
+
+            asset_ids: set[str] = set()
+            asset_paths: set[str] = set()
+            assets_by_id: dict[str, dict[str, Any]] = {}
+            for asset in manifest["assets"]:
+                key = asset["id"].casefold()
+                path = asset["path"].casefold()
+                if key in asset_ids or path in asset_paths:
+                    raise NotebookValidationError(f"Duplicate asset ID or path: {asset['path']}")
+                asset_ids.add(key)
+                asset_paths.add(path)
+                assets_by_id[key] = asset
+                _verify_asset_bytes(package, asset)
+
+            # Only explicitly declared files belong in a schema v1 archive.
+            declared = {"manifest.json"}
+            declared.update(reference["path"] for reference in manifest["pages"])
+            declared.update(asset["path"] for asset in manifest["assets"])
+            extra = set(package.namelist()) - declared
+            if extra:
+                raise NotebookValidationError(f"Unlisted archive member: {sorted(extra)[0]}")
+
+            seen_element_ids: set[str] = set()
+            seen_page_ids: set[str] = set()
             for reference in manifest["pages"]:
                 name = reference["path"]
+                key = reference["id"].casefold()
+                if key in seen_page_ids:
+                    raise NotebookValidationError(f"Duplicate manifest page ID: {reference['id']}")
+                seen_page_ids.add(key)
+                if name.casefold() != f"pages/{reference['id'].lower()}.json":
+                    raise NotebookValidationError(f"Page path does not match its ID: {name}")
                 page = _read_json_member(package, name, MAX_PAGE_JSON_BYTES)
                 _schema_check(page_validator, page, name)
-                if page["id"] != reference["id"]:
+                if page["id"].casefold() != key:
                     raise NotebookValidationError(f"Page ID mismatch: {name}")
+                _validate_page_semantics(page, assets_by_id, seen_element_ids)
             return manifest
     except (OSError, zipfile.BadZipFile, UnicodeDecodeError, json.JSONDecodeError,
             UnicodeError, ValueError) as exc:
@@ -187,7 +316,7 @@ def _main() -> int:
     except NotebookValidationError as exc:
         print(f"INVALID: {exc}")
         return 1
-    print(f"VALID (draft schema + preflight only): {args.archive}")
+    print(f"VALID (preflight + draft schema + implemented semantic checks): {args.archive}")
     return 0
 
 

@@ -1,44 +1,43 @@
-# Portable `.notebook` validation — FMT-02 (working draft)
+# Portable `.notebook` validator — FMT-02 (working draft)
 
-Scope and source: this validator implements the V0.2 document model's *proposed* `schemaVersion: 1`. The JSON Schema in `../schemas/notebook_schema_v1_draft.json` has been reconstructed from the approved V0.2 specification because the original companion draft was not present in the inspected repository path. It is a **new implementation proposal**, not a recovered production schema. Both developers should review the strictness decisions below before merging.
+This validator implements preflight, draft JSON Schema 2020-12, and the **Checkpoint 3 semantic checks** based on the jointly reviewed V0.2 document model (`schemaVersion: 1`, still provisional). The schema was reconstructed from V0.2 during Checkpoint 2; it is **not** the original missing companion artifact or an immutable production contract.
 
-## Running locally
-
-From the repository root:
+## Run from the repository root (Windows PowerShell)
 
 ```powershell
 py -3 -m pip install -r shared/validators/requirements.txt
 py -3 -m unittest discover -s shared/validators/tests -v
-py -3 shared/validators/validate_notebook.py path/to/example.notebook
+py -3 shared/validators/validate_notebook.py path/to/synthetic.notebook
 ```
 
-Run only on synthetic/test packages until full semantic and asset validation is implemented. An exit status of 0 currently means **preflight + draft JSON Schema checks pass**, not that an imported archive is safe to register in the app database.
+A successful exit status means all **implemented** checks pass, not that untrusted content is safe to decode or register in a database. The unit tests build disposable synthetic ZIPs in memory; they are **not** the golden documents that belong to FMT-03 (#13).
 
-## Checkpoint 1 (existing)
+## Checkpoint 1 — preflight
 
-- Archive structure, paths, duplicate ZIP entries, symlinks, encryption and provisional size caps
-- Manifest presence, schema version, duplicate page references and missing page files
+- Safe ZIP paths, unique entries (including case-insensitive collisions), no symlinks/encryption, provisional file-count/compressed/uncompressed size caps.
+- Manifest required; draft version 1 only; page references resolve to existing page entries.
 
-## Checkpoint 2 (this change)
+## Checkpoint 2 — draft schema
 
-- Draft 2020-12 schema for the manifest, pages, four editable element envelopes and backgrounds
-- UTC-compatible timestamp syntax (ordering not yet checked)
-- Page schema validation, page-ID alignment with manifest references, finite floating-point parsing, duplicate JSON-key rejection
-- Command-line exit codes and synthetic positive/negative schema tests
+- Manifest and page JSON Schema checks; supported editable elements (stroke, shape, text, image) and backgrounds.
+- Invalid timestamps and nonfinite numbers rejected; duplicate JSON keys rejected; referenced page IDs match their pages.
+- RFC 3339 format checking requires both `jsonschema` and `rfc3339-validator` from `requirements.txt`.
 
-## Deferred semantic validations (next checkpoints)
+## Checkpoint 3 — semantic validation
 
-- Verify that every asset exists, its MIME/file signature matches, SHA-256 and byte length match, and paths agree with the hash and extension
-- Check duplicate note-wide element/asset IDs and image/PDF asset references
-- Verify invertible transforms, chronological timestamps, crop containment and time ordering
-- Validate PDF page index with a safe PDF parser; enforce operational limits and unknown-entry policy
-- Produce separately reviewed golden and malformed fixtures in FMT-03 and integrate CI in FND-07A
+- UTC timestamps and `createdAt <= updatedAt`.
+- Asset ID/path uniqueness; presence, content-derived filenames, byte lengths, SHA-256 and basic MIME signatures (PNG/JPEG/PDF).
+- Each image refers to an actual registered image; each PDF background to an actual registered PDF.
+- Element IDs unique across the **entire note**, including separate pages.
+- Invertible 2×2 affine transform; nondecreasing stroke `tMs`; image crop containment.
+- Page filenames match page IDs and undeclared archive files are rejected.
+- Provisional element/point count caps; assets streamed in chunks to bound RAM.
 
-## Strictness choices pending final cross-platform review
+## Remaining limitations and future work
 
-- `additionalProperties: false` on known v1 structures avoids silently ignoring unknown fields.
-- All shown envelope fields and the manifest's `assets` array are required, even when empty.
-- `pdfPage.displayBox` currently accepts `crop` only, as shown in V0.2; alternative boxes need an explicit contract revision.
-- Brush/text enums mirror V0.2. Any future editing or rendering extensions require coordinated schema and fixture updates.
-
-None of these decisions freeze production format compatibility or commit the project to a handwriting engine.
+- PDF is only checked by its `%PDF-` prefix. **PDF page count, valid `pageIndex`, malformed content, rendering and embedded structure are NOT checked**. Use a bounded, sandbox-conscious PDF parser before import acceptance.
+- PNG/JPEG signatures are *not* full file-format decoding or protection against crafted image payloads. Additional decoder and pixel/dimension limits are needed before production import.
+- Validation is separate from the **transactional staging/commit, asset GC, and crash recovery** protocols described in the storage plan.
+- More adversarial ZIP cases (CRC corruption, decompression resource caps) and golden round-trip fixtures remain for FMT-03, integration/CI and hardening.
+- Resource caps are provisional and require empirical review. Unknown fields are rejected by the draft JSON Schema; this policy and undeclared-file rejection should be reviewed jointly before treating v1 as frozen.
+- The validator does not select or implement a handwriting engine. All assets and test records must be synthetic.
