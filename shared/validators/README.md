@@ -41,3 +41,15 @@ A successful exit status means all **implemented** checks pass, not that untrust
 - More adversarial ZIP cases (CRC corruption, decompression resource caps) and golden round-trip fixtures remain for FMT-03, integration/CI and hardening.
 - Resource caps are provisional and require empirical review. Unknown fields are rejected by the draft JSON Schema; this policy and undeclared-file rejection should be reviewed jointly before treating v1 as frozen.
 - The validator does not select or implement a handwriting engine. All assets and test records must be synthetic.
+
+## Checkpoint 4 — GitHub Actions gate
+
+`.github/workflows/shared-format-ci.yml` runs on pull requests, pushes to `main`,
+and manual dispatch. It installs the declared Python dependencies and executes
+all the validator unit tests. The new CLI tests verify correct success/failure
+exit codes for valid archives and synthetic invalid versions, hashes, and paths.
+
+The Android build remains in `.github/workflows/android-ci.yml` and is not
+modified by this checkpoint. CI's test packages are generated in temporary
+directories. FMT-03 (#13) will add committed golden `.notebook` fixtures and
+separate conformance checks; this workflow does not claim to test those yet.
