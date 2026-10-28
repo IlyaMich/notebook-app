@@ -1,0 +1,4 @@
+# FMT-02 portable JSON Schema validation, Draft 2020-12
+jsonschema>=4.23,<5
+# Required by jsonschema.FormatChecker for JSON Schema date-time checks.
+rfc3339-validator>=0.1.4,<1
