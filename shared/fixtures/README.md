@@ -28,5 +28,29 @@ For CI, `shared/validators/tests/test_golden_fixtures.py` automatically exercise
 
 - Positive fixture validation does **not** show that Android or iPadOS can render or round-trip the archive. Those checks happen during later native implementation.
 - The Python FMT-02 validator checks PDF asset references and signatures but does **not** currently verify PDF page count, `pageIndex` validity, PDF rendering or malformed PDF structures. This golden PDF was separately verified to have two pages during fixture creation; that does not add PDF parsing to the validator.
-- Invalid/edge-case `.notebook` archives and expected rejection reasons are the **next FMT-03 checkpoint**; this change does not claim that the full #13 acceptance criteria are complete.
+- The positive golden above was Checkpoint 1; Checkpoint 2 below adds committed negative/edge-case `.notebook` archives and expected validation results.
 - The golden document must not contain notebook/folder library relationships; those belong in local database metadata, not portable page geometry.
+
+## Checkpoint 2: committed edge-case and invalid packages
+
+`build_edge_cases.py` adds **two valid edge cases** and **24 deliberately invalid packages**. Each is a complete binary `.notebook` ZIP fixture. The standard-library generator produces deterministic bytes on Windows and Linux using fixed ZIP metadata and uncompressed members.
+
+The `expected_results.json` catalog records each fixture's intended accept/reject status and reason. `error_contains` is only a guard for the present **Python** validator's error categorization; Android/iPadOS importers must preserve the accept/reject decision, but their error text need not match exactly. Negative packages must never mutate the app's existing notes during import.
+
+New *valid* files:
+
+- `valid/empty_page_v1.notebook`: one blank page, no elements/assets, and equal creation/update UTC timestamps.
+- `valid/single_point_stroke_v1.notebook`: single-point pencil stroke with opacity zero, invertible reflection transform, and dotted background.
+
+New *invalid* files under `invalid/` exercise ZIP traversal/absolute paths, duplicate entries, symlinks, a missing manifest, unsupported wire version, missing page and asset members, duplicate JSON keys and IDs, invalid page sizes and element types, noninvertible transforms, backwards sample times, out-of-range image crops, incorrect image/PDF references, wrong asset hashes/lengths, inconsistent timestamps, unlisted members, and mismatched page IDs.
+
+From the repository root:
+
+```powershell
+py -3 shared/fixtures/build_edge_cases.py
+py -3 -m unittest discover -s shared/validators/tests -v
+```
+
+`test_edge_case_fixtures.py` verifies **every committed fixture byte for byte**, exercises every expected validation result, and ensures the manifest catalog lists the edge-case files exactly once. These tests run automatically in the existing Shared Format CI workflow. There is no need to modify the Android CI job or the FMT-02 validator for this checkpoint.
+
+**Limitations:** `expected_results.json` is *not* a comprehensive security specification. The FMT-02 validator still verifies PDF signatures but not PDF page counts or full PDF/image decoding. Therefore, a PDF with an out-of-range `pageIndex` is **not included as an expected-rejection fixture** yet. Add that case only after a PDF-aware validation rule is agreed and implemented. Further resource-limit, decompression and native import tests belong to future hardening and platform integration work.
