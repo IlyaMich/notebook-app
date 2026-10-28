@@ -1,13 +1,17 @@
-"""FMT-02 checkpoint 1: safe ZIP/package preflight (not full schema validation)."""
+"""FMT-02 checkpoint 2: safe ZIP/package preflight (not full schema validation)."""
 
 from __future__ import annotations
 
+import argparse
 import json
+import math
 import re
 import stat
 import zipfile
 from pathlib import Path
 from typing import Any
+
+from jsonschema import Draft202012Validator, FormatChecker
 
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024  # Provisional safety limits; review in FMT-01/02.
 MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
@@ -108,3 +112,84 @@ def preflight_notebook(archive: Path) -> dict[str, Any]:
             return manifest
     except (OSError, zipfile.BadZipFile, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise NotebookValidationError(f"Unreadable .notebook archive: {exc}") from exc
+
+# Checkpoint 2: draft JSON Schema verification. Semantic checks are implemented
+# incrementally in subsequent FMT-02 checkpoints.
+SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "notebook_schema_v1_draft.json"
+MAX_PAGE_JSON_BYTES = 16 * 1024 * 1024  # Provisional; benchmark before release.
+
+
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise NotebookValidationError(f"Non-finite JSON number: {value}")
+    return parsed
+
+
+def _read_json_member(package: zipfile.ZipFile, name: str, limit: int) -> dict[str, Any]:
+    info = package.getinfo(name)
+    if info.file_size > limit:
+        raise NotebookValidationError(f"JSON member exceeds size limit: {name}")
+    data = json.loads(
+        package.read(name).decode("utf-8"),
+        object_pairs_hook=_no_duplicate_keys,
+        parse_constant=_reject_nonfinite,
+        parse_float=_finite_float,
+    )
+    if not isinstance(data, dict):
+        raise NotebookValidationError(f"JSON member must be an object: {name}")
+    return data
+
+
+def _schema_check(validator: Draft202012Validator, document: dict[str, Any], label: str) -> None:
+    error = next(validator.iter_errors(document), None)
+    if error is not None:
+        location = "/".join(map(str, error.absolute_path)) or "<root>"
+        raise NotebookValidationError(f"Schema violation in {label} at {location}: {error.message}")
+
+
+def validate_notebook(archive: Path) -> dict[str, Any]:
+    """Validate archive preflight and draft manifest/page schemas.
+
+    This is NOT full semantic validation of assets, references or geometry.
+    Returns the manifest only if the checks completed successfully.
+    """
+    preflight_notebook(archive)
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    page_schema = {"$ref": "#/$defs/page", "$defs": schema["$defs"]}
+    page_validator = Draft202012Validator(page_schema, format_checker=FormatChecker())
+    try:
+        with zipfile.ZipFile(archive) as package:
+            manifest = _read_json_member(package, "manifest.json", MAX_MANIFEST_BYTES)
+            _schema_check(validator, manifest, "manifest.json")
+            for reference in manifest["pages"]:
+                name = reference["path"]
+                page = _read_json_member(package, name, MAX_PAGE_JSON_BYTES)
+                _schema_check(page_validator, page, name)
+                if page["id"] != reference["id"]:
+                    raise NotebookValidationError(f"Page ID mismatch: {name}")
+            return manifest
+    except (OSError, zipfile.BadZipFile, UnicodeDecodeError, json.JSONDecodeError,
+            UnicodeError, ValueError) as exc:
+        if isinstance(exc, NotebookValidationError):
+            raise
+        raise NotebookValidationError(f"Unreadable .notebook archive: {exc}") from exc
+
+
+def _main() -> int:
+    parser = argparse.ArgumentParser(description="Validate a draft .notebook package")
+    parser.add_argument("archive", type=Path, help="Path to .notebook archive")
+    args = parser.parse_args()
+    try:
+        validate_notebook(args.archive)
+    except NotebookValidationError as exc:
+        print(f"INVALID: {exc}")
+        return 1
+    print(f"VALID (draft schema + preflight only): {args.archive}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
