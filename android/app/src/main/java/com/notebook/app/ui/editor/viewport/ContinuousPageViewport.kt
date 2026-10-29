@@ -3,7 +3,7 @@ package com.notebook.app.ui.editor.viewport
 import android.graphics.Paint
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -28,6 +28,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -42,9 +43,10 @@ data class PageViewportItem(
 )
 
 /**
- * EDT-03 checkpoint 2: a read-only, vertically pannable Canvas of persisted, mixed-size pages.
- * Geometry comes exclusively from the EDT-03 checkpoint 1 engine; no document writes occur.
- * Pinch zoom, complete input arbitration, and canonical element rendering arrive later.
+ * EDT-03 checkpoint 3: a read-only Canvas of persisted, mixed-size pages.
+ * Touch drag pans in either direction, and pinch zooms around the previous pointer centroid.
+ * Geometry is transient: no document writes or canonical element changes occur.
+ * Tool input arbitration, resize anchor restoration, and element rendering arrive later.
  */
 @Composable
 fun ContinuousPageViewport(
@@ -85,31 +87,46 @@ fun ContinuousPageViewport(
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     val viewportPx = PxSize(canvasSize.width.toDouble(), canvasSize.height.toDouble())
     // Re-fit on layout/size changes. Scrolling is view-only state, never a persisted revision.
-    var transform by remember(layout, canvasSize, gutterPx) {
-        mutableStateOf(ViewportGeometry.fitToWidthOrNull(layout, viewportPx, gutterPx))
+    val fitted = remember(layout, canvasSize, gutterPx) {
+        ViewportGeometry.fitToWidthOrNull(layout, viewportPx, gutterPx)
     }
+    var transform by remember(layout, canvasSize, gutterPx) {
+        mutableStateOf(fitted)
+    }
+    val zoomPercent = transform?.let { active ->
+        fitted?.let { initial ->
+            ((active.scalePxPerDu / initial.scalePxPerDu) * 100.0).toInt()
+        }
+    } ?: 100
 
     Canvas(
         modifier = modifier
             .fillMaxSize()
             .background(surround)
             .clipToBounds()
-            .semantics { contentDescription = "Read-only note viewport with ${pages.size} pages" }
+            .semantics {
+                contentDescription = "Read-only note viewport with ${pages.size} pages"
+                stateDescription = "Zoom $zoomPercent percent"
+            }
             .onSizeChanged { canvasSize = it }
             .pointerInput(layout, canvasSize, gutterPx) {
-                // Temporary read-only navigation. Pinch, touch/stylus arbitration and anchor
-                // preservation on resize are implemented in the next checkpoint.
-                detectDragGestures { change, dragAmount ->
-                    val previous = transform ?: return@detectDragGestures
-                    val moved = ViewportGeometry.pan(
-                        previous,
-                        PxPoint(dragAmount.x.toDouble(), dragAmount.y.toDouble()),
+                // Compose reports the previous-frame centroid and the current-frame pan delta.
+                // Applying zoom at the former, then pan, keeps the focal document point under
+                // the moving fingers until edge clamping becomes necessary.
+                detectTransformGestures(panZoomLock = true) { centroid, pan, zoom, _ ->
+                    val previous = transform ?: return@detectTransformGestures
+                    val fitScale = fitted?.scalePxPerDu ?: return@detectTransformGestures
+                    val next = ViewportNavigation.updateOrNull(
+                        layout = layout,
+                        viewport = viewportPx,
+                        gutterPx = gutterPx,
+                        fitScalePxPerDu = fitScale,
+                        current = previous,
+                        centroidPreviousPx = PxPoint(centroid.x.toDouble(), centroid.y.toDouble()),
+                        panPx = PxPoint(pan.x.toDouble(), pan.y.toDouble()),
+                        zoomChange = zoom.toDouble(),
                     )
-                    val clamped = ViewportGeometry.clampOrNull(layout, viewportPx, gutterPx, moved)
-                    if (clamped != null) {
-                        transform = clamped
-                        change.consume()
-                    }
+                    if (next != null) transform = next
                 }
             },
     ) {
