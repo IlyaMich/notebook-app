@@ -16,6 +16,10 @@ import kotlinx.serialization.Serializable
 @Serializable
 data object LibraryRoute : NavKey
 
+/** Each folder lives on the back stack, so Back returns to the exact parent context. */
+@Serializable
+data class FolderRoute(val folderId: String) : NavKey
+
 @Serializable
 data class NotebookRoute(val notebookId: String) : NavKey
 
@@ -40,7 +44,21 @@ fun NotebookApp() {
         entryProvider = entryProvider {
             entry<LibraryRoute> {
                 LibraryScreen(
+                    folderRepository = repositories.folders,
                     notebookRepository = repositories.notebooks,
+                    parentFolderId = null,
+                    onOpenFolder = { folderId -> backStack.add(FolderRoute(folderId)) },
+                    onOpenNotebook = { notebookId -> backStack.add(NotebookRoute(notebookId)) },
+                )
+            }
+
+            entry<FolderRoute> { route ->
+                LibraryScreen(
+                    folderRepository = repositories.folders,
+                    notebookRepository = repositories.notebooks,
+                    parentFolderId = route.folderId,
+                    onBack = { navigateBack() },
+                    onOpenFolder = { folderId -> backStack.add(FolderRoute(folderId)) },
                     onOpenNotebook = { notebookId -> backStack.add(NotebookRoute(notebookId)) },
                 )
             }

@@ -50,7 +50,12 @@ class AndroidLibraryUiSmokeTest {
     @Test fun rootLibraryProvisionsQuickNotesAndShowsRealNotebooks() {
         compose.setContent {
             MaterialTheme {
-                LibraryScreen(notebookRepository = repositories.notebooks, onOpenNotebook = {})
+                LibraryScreen(
+                    folderRepository = repositories.folders,
+                    notebookRepository = repositories.notebooks,
+                    onOpenFolder = {},
+                    onOpenNotebook = {},
+                )
             }
         }
         compose.waitUntil(10_000L) {
