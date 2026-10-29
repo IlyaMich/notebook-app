@@ -91,6 +91,7 @@ fun NoteEditorScreen(
                         modifier = Modifier.padding(12.dp),
                         style = MaterialTheme.typography.bodySmall)
                     ContinuousPageViewport(
+                        documentKey = noteId,
                         pages = stored.pages.map { page ->
                             PageViewportItem(
                                 id = page.id,

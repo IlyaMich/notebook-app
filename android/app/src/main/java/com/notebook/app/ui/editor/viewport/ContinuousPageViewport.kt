@@ -3,15 +3,18 @@ package com.notebook.app.ui.editor.viewport
 import android.graphics.Paint
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,15 +46,17 @@ data class PageViewportItem(
 )
 
 /**
- * EDT-03 checkpoint 3: a read-only Canvas of persisted, mixed-size pages.
- * Touch drag pans in either direction, and pinch zooms around the previous pointer centroid.
+ * EDT-03 checkpoint 4: a read-only Canvas of persisted, mixed-size pages.
+ * Touch drag pans, pinch zooms, and taps resolve page-local hit targets for later tools.
+ * On window/layout resize, an anchor and relative zoom are preserved where edge clamping allows.
  * Geometry is transient: no document writes or canonical element changes occur.
- * Tool input arbitration, resize anchor restoration, and element rendering arrive later.
+ * Tool input arbitration and element rendering arrive in later issues.
  */
 @Composable
 fun ContinuousPageViewport(
     pages: List<PageViewportItem>,
     modifier: Modifier = Modifier,
+    documentKey: String = pages.firstOrNull()?.id.orEmpty(),
 ) {
     val layout = remember(pages) {
         ViewportGeometry.layoutOrNull(pages.map { PageSizeDu(it.id, it.widthDu, it.heightDu) })
@@ -86,18 +91,62 @@ fun ContinuousPageViewport(
 
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     val viewportPx = PxSize(canvasSize.width.toDouble(), canvasSize.height.toDouble())
-    // Re-fit on layout/size changes. Scrolling is view-only state, never a persisted revision.
     val fitted = remember(layout, canvasSize, gutterPx) {
         ViewportGeometry.fitToWidthOrNull(layout, viewportPx, gutterPx)
     }
-    var transform by remember(layout, canvasSize, gutterPx) {
-        mutableStateOf(fitted)
+    // Keep the previous measured viewport with its transform. Simply keying remember() by
+    // canvasSize would reset to the first page on every rotation or split-screen resize.
+    var session by remember(documentKey) { mutableStateOf<ViewportSession?>(null) }
+    var selectedPageId by remember(documentKey) { mutableStateOf<String?>(null) }
+    // remember survives only recomposition, not a rotation that recreates the Activity.
+    // Save a minimal, note-keyed page-local bookmark that can be rebuilt for any screen size.
+    var savedPageId by rememberSaveable(documentKey) { mutableStateOf("") }
+    var savedXDu by rememberSaveable(documentKey) { mutableStateOf(0.0) }
+    var savedYDu by rememberSaveable(documentKey) { mutableStateOf(0.0) }
+    var savedRelativeZoom by rememberSaveable(documentKey) { mutableStateOf(1.0) }
+
+    fun saveViewportAnchor(transformToSave: ViewportTransform) {
+        val anchor = ViewportInteraction.captureAnchorOrNull(
+            layout, viewportPx, gutterPx, transformToSave,
+        ) ?: return
+        savedPageId = anchor.pageId
+        savedXDu = anchor.localXDu
+        savedYDu = anchor.localYDu
+        savedRelativeZoom = anchor.zoomRelativeToFit
     }
-    val zoomPercent = transform?.let { active ->
+
+    LaunchedEffect(layout, canvasSize, gutterPx) {
+        if (fitted != null) {
+            val previous = session
+            val next = when {
+                previous != null -> ViewportInteraction.restoreAfterChangeOrNull(
+                    previous.layout, previous.viewport, previous.gutterPx, previous.transform,
+                    layout, viewportPx, gutterPx,
+                ) ?: fitted
+                savedPageId.isNotEmpty() -> ViewportInteraction.restoreAnchorOrNull(
+                    ViewportAnchor(savedPageId, savedXDu, savedYDu, savedRelativeZoom),
+                    layout, viewportPx, gutterPx,
+                ) ?: fitted
+                else -> fitted
+            }
+            session = ViewportSession(layout, viewportPx, gutterPx, next)
+            saveViewportAnchor(next)
+        }
+        // If size becomes zero during rotation, retain the prior bookmark.
+    }
+    // Don't display stale positions for one frame while the new viewport is measured.
+    val activeSession = session?.takeIf {
+        it.layout == layout && it.viewport == viewportPx && it.gutterPx == gutterPx
+    }
+    val transform = activeSession?.transform
+    val zoomPercent = transform?.let { current ->
         fitted?.let { initial ->
-            ((active.scalePxPerDu / initial.scalePxPerDu) * 100.0).toInt()
+            ((current.scalePxPerDu / initial.scalePxPerDu) * 100.0).toInt()
         }
     } ?: 100
+    val selectedPageNumber = pages.indexOfFirst { it.id == selectedPageId }
+    val selectionLabel = if (selectedPageNumber < 0) "no page selected"
+        else "selected page ${selectedPageNumber + 1}"
 
     Canvas(
         modifier = modifier
@@ -106,27 +155,41 @@ fun ContinuousPageViewport(
             .clipToBounds()
             .semantics {
                 contentDescription = "Read-only note viewport with ${pages.size} pages"
-                stateDescription = "Zoom $zoomPercent percent"
+                stateDescription = "Zoom $zoomPercent percent; $selectionLabel"
             }
             .onSizeChanged { canvasSize = it }
             .pointerInput(layout, canvasSize, gutterPx) {
-                // Compose reports the previous-frame centroid and the current-frame pan delta.
-                // Applying zoom at the former, then pan, keeps the focal document point under
-                // the moving fingers until edge clamping becomes necessary.
+                detectTapGestures { tapped ->
+                    val current = session?.takeIf {
+                        it.layout == layout && it.viewport == viewportPx && it.gutterPx == gutterPx
+                    } ?: return@detectTapGestures
+                    // A tap in the gutter, gap, or narrower-page margin has no page target.
+                    selectedPageId = ViewportInteraction.hitTestVisiblePage(
+                        PxPoint(tapped.x.toDouble(), tapped.y.toDouble()),
+                        layout, current.transform, viewportPx,
+                    )?.pageId
+                }
+            }
+            .pointerInput(layout, canvasSize, gutterPx) {
                 detectTransformGestures(panZoomLock = true) { centroid, pan, zoom, _ ->
-                    val previous = transform ?: return@detectTransformGestures
+                    val previous = session?.takeIf {
+                        it.layout == layout && it.viewport == viewportPx && it.gutterPx == gutterPx
+                    } ?: return@detectTransformGestures
                     val fitScale = fitted?.scalePxPerDu ?: return@detectTransformGestures
                     val next = ViewportNavigation.updateOrNull(
                         layout = layout,
                         viewport = viewportPx,
                         gutterPx = gutterPx,
                         fitScalePxPerDu = fitScale,
-                        current = previous,
+                        current = previous.transform,
                         centroidPreviousPx = PxPoint(centroid.x.toDouble(), centroid.y.toDouble()),
                         panPx = PxPoint(pan.x.toDouble(), pan.y.toDouble()),
                         zoomChange = zoom.toDouble(),
                     )
-                    if (next != null) transform = next
+                    if (next != null) {
+                        session = previous.copy(transform = next)
+                        saveViewportAnchor(next)
+                    }
                 }
             },
     ) {
@@ -162,6 +225,14 @@ fun ContinuousPageViewport(
         }
     }
 }
+
+/** The viewport dimensions and its transient transform must move together on remeasurement. */
+private data class ViewportSession(
+    val layout: ContinuousPageLayout,
+    val viewport: PxSize,
+    val gutterPx: Double,
+    val transform: ViewportTransform,
+)
 
 @Preview(name = "EDT-03 mixed-size page stack", widthDp = 600, heightDp = 700)
 @Composable
