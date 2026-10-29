@@ -31,6 +31,9 @@ interface NotebookDao {
     @Query("SELECT MAX(sort_order) FROM notebooks WHERE parent_folder_id IS :parentId AND deleted_at IS NULL")
     suspend fun maxActiveSortOrder(parentId: String?): Long?
 
+    @Query("SELECT * FROM notebooks WHERE deletion_batch_id = :batchId AND deleted_at IS NOT NULL ORDER BY id ASC")
+    suspend fun listTrashedByBatch(batchId: String): List<NotebookEntity>
+
     @Query("SELECT COUNT(*) FROM notebooks")
     suspend fun countAll(): Int
 }

@@ -29,6 +29,9 @@ interface FolderDao {
     @Query("SELECT MAX(sort_order) FROM folders WHERE parent_folder_id IS :parentId AND deleted_at IS NULL")
     suspend fun maxActiveSortOrder(parentId: String?): Long?
 
+    @Query("SELECT * FROM folders WHERE deletion_batch_id = :batchId AND deleted_at IS NOT NULL ORDER BY id ASC")
+    suspend fun listTrashedByBatch(batchId: String): List<FolderEntity>
+
     @Query("SELECT COUNT(*) FROM folders")
     suspend fun countAll(): Int
 }
