@@ -1,13 +1,11 @@
-# STO-02 — Android Note/Page/Element Persistence Contract V0.1 (Joint Review Update)
+# STO-02 — Android Note/Page/Element Persistence Contract V0.1
 
 **Date:** 2026-10-28  
-**Status:** Jointly reviewed architectural direction (reported agreement on 2026-10-28); **specific LIB-03 API, Kotlin type, Room schema, and transaction-owner decisions remain pending**. No Room code or migration is implemented by this document.  
+**Status:** Proposed implementation mapping for joint review; **not** an approved Room database schema or implemented migration.  
 **Issue:** [STO-02 #25](https://github.com/IlyaMich/notebook-app/issues/25)  
 **Dependencies:** FMT-01 (reviewed); LIB-03 #18 (awaiting LIB-01 #16 and repository-contract agreement).  
 **Primary owner:** storage / document persistence developer.  
 **Related ownership:** library domain and repository interfaces developer.
-
-**Review record (2026-10-28):** Both developers have reviewed the V0.1 proposal and agreed to incorporate the recommendations from the Checkpoint-1 review: explicit shared-database ownership, note lifecycle and first/last page rules, duplication/identity handling, revision and ordering semantics, Android-side validation, and focused persistence tests. This records agreement on **what must be specified**, not decisions about as-yet-unseen LIB-01/LIB-03 Kotlin classes. The detailed decisions in Section 8 remain deliberately open until those interfaces are available.
 
 ## 1. Basis, goal and non-goals
 
@@ -45,21 +43,9 @@ Element(id, pageId, orderIndex, kind, canonical JSON, revision) — STO-02
 
 **Library hierarchy metadata is not serialized into the portable note page geometry.** Moving a note between notebooks changes `notes.notebook_id`; pages, elements, transforms and content remain unchanged.
 
-The `notes` table, `NoteEntity` and library-facing note lifecycle interface belong to LIB-03, unless the two developers explicitly agree otherwise. STO-02 should *reference* its note ID and participate in the **same SQLite/Room database instance and transaction boundary**, not invent a second `notes` entity.
+The `notes` table and note lifecycle interface belong to LIB-03, unless the two developers explicitly agree otherwise. STO-02 should *reference* its note ID and participate in the **same SQLite/Room database instance and transaction boundary**, not invent a second `notes` entity.
 
-| Concern | Agreed direction | Still to assign or finalize |
-|---|---|---|
-| Folder/notebook domain and repositories | LIB-01/LIB-03 developer | Concrete Kotlin contracts and packages |
-| `notes` metadata, notebook relationship, and `NoteEntity` | LIB-03 developer | Table layout, revision and lifecycle integration |
-| `pages`, `elements`, and their DAOs | STO-02 developer | Entity/DAO signatures, serializers and adapters |
-| One `AppDatabase`, schema export and migrations | Shared database, **one owner** | Named maintainer for database class/version/migrations |
-| Create note + initial page | **One transaction** in shared database | Which public service orchestrates both inserts |
-| Element-command durability and save status | Commit before acknowledging saved revision | Final interface, caller and error/result contracts |
-| Assets and asset references | Separate coordinated work, later | Asset owner and lifecycle implementation |
-
-**Integration rule:** neither developer introduces duplicate note entities or independent databases. Compose screens depend on agreed repository/use-case APIs, not Room DAOs. An orchestration service may be jointly designed, but should have a single code owner.
-
-## 3. Candidate persistence mapping (reviewed direction; physical schema pending)
+## 3. Candidate persistence mapping (pending joint review)
 
 | Table | Proposed columns | Storage rules |
 |---|---|---|
@@ -68,26 +54,21 @@ The `notes` table, `NoteEntity` and library-facing note lifecycle interface belo
 | `elements` | `id`, `page_id`, `order_index`, `kind`, `element_json`, `revision` | `page_id` FK to `pages`; one row per editable element, not a whole-page JSON document; `element_json` preserves the full canonical V0.2 envelope. |
 | `assets` / `asset_references` (later coordinated scope) | `id`, `sha256`, `mime_type`, `byte_size`, `relative_path`, `state` / owner references | Original bytes live in app-private immutable files; references and lifetime are coordinated transactionally. **Do not** eagerly implement in this checkpoint. |
 
-**Unfinalized suggested physical types:** UUIDs as `TEXT` using canonical textual UUID representation; page dimensions as SQLite `REAL`/Kotlin `Double`; ordered indexes and revisions as `INTEGER`/Kotlin `Long` or `Int` according to actual bounds; canonical JSON as UTF-8 `TEXT` with explicit serializers. The choice of `TEXT` timestamps (ISO/RFC 3339 UTC) versus `INTEGER` UTC epoch milliseconds is **open** until agreement. If using epoch milliseconds, serialization to the portable archive must produce UTC RFC 3339 strings without precision loss at the agreed granularity.
+**Suggested physical types:** UUIDs as `TEXT` using canonical textual UUID representation; page dimensions as SQLite `REAL`/Kotlin `Double`; ordered indexes and revisions as `INTEGER`/Kotlin `Long` or `Int` according to actual bounds; canonical JSON as UTF-8 `TEXT` with explicit serializers. The choice of `TEXT` timestamps (ISO/RFC 3339 UTC) versus `INTEGER` UTC epoch milliseconds is **open** until agreement. If using epoch milliseconds, serialization to the portable archive must produce UTC RFC 3339 strings without precision loss at the agreed granularity.
 
 **Identity scope needs explicit agreement:** the document spec requires element IDs unique *within a note*; the storage plan proposes globally unique UUID identifiers. A table-level global primary key is a stronger rule. If adopted, importing a second valid note with colliding element/page IDs requires an explicit deterministic ID remap with preserved references; alternatively use composite keys. Do not silently reject valid portable documents only because of a storage-key shortcut.
 
 **Canonical JSON:** store stroke points, transform, `locked`, and payload as individual element JSON. `kind` may be an indexed projection for queries but is never an independent incompatible source of truth: validate that it matches the JSON envelope on writes. No authoritative persisted `bounds`, viewport zoom or rasterized element replacement. Pixel caches and native ink data are disposable.
-
-**Duplicating a note:** LIB-03's acceptance criteria include duplication. A duplicate must have a **new note ID**, new page IDs and new element IDs; preserve the source note's ordered content and canonical geometry. Perform the snapshot-and-clone operation atomically with the agreed library orchestration. Remap all internal references consistently. Image/PDF asset reference handling must wait for the later asset-lifecycle work; no partial asset-backed duplication should be falsely reported complete.
-
-**Local revision fields:** The note revision is the authoritative monotonic acknowledgment token for document writes. Page/element `revision` columns are optional optimization candidates until the collaborators choose a clear meaning (e.g. their last-modified note revision). They must not create competing save-status counters. `updated_at` is modified in the same transaction as a committed document command, using the agreed UTC convention.
 
 ## 4. Constraints and indexes to implement or enforce
 
 - `pages.note_id → notes.id` and `elements.page_id → pages.id` are enforced FKs. The proposed `notes` deletion model uses soft delete; any hard-delete cascades must be deliberate and tested, not accidental loss of trashed content.
 - Pages are unique and ordered by `(note_id, order_index)`; elements by `(page_id, order_index)`. Reading must always use `ORDER BY order_index` plus a stable ID tie-breaker for legacy/corrupt states.
 - Recommended indexes: `pages(note_id, order_index)` and `elements(page_id, order_index)`; choose uniqueness and enforcement in Room after verifying reorder behavior.
-- Reordering inside a single transaction must not transiently violate immediate SQLite unique constraints. Use a reviewed two-phase temporary-index algorithm (or a safe equivalent), not a naïve swap of two unique positions. A candidate is temporarily allocating non-colliding indexes above the current maximum, then writing final indexes; validate integer bounds, cross-parent moves, and failure rollback with SQLite tests.
-- **Recommended committed-state invariant (pending exact API decision):** per-note page indexes and per-page element indexes are contiguous, zero-based integers `0..N-1` with no duplicates. Append, insert, delete, reorder and cross-page transfer must leave a normalized order at transaction commit; only affected ordering rows should change.
+- Reordering inside a single transaction must not transiently violate immediate SQLite unique constraints. Use a reviewed two-phase temporary-index algorithm (or a safe equivalent), not a naïve swap of two unique positions.
 - Positive finite page sizes, recognized page backgrounds, finite/non-singular element transforms and typed payload validity must be checked before persisted content is acknowledged as saved. Do not rely on SQL constraints alone for the complete portable semantic contract.
 - A page belongs to exactly one note and an element belongs to exactly one page. Moving a note in the library must not rewrite its page/element rows.
-- An empty **note** is not part of the portable V0.2 contract: a newly created note should atomically receive at least one default page, following the agreed note-creation API. Deleting the **last remaining page** of an active note must either be rejected or atomically replaced by a default page according to the finalized UI/repository policy; do not commit an active zero-page note. Soft-deleted notes retain pages/elements for restore. Permanent deletion and hard-delete cascades remain jointly owned and need explicit tests.
+- An empty **note** is not part of the portable V0.2 contract: a newly created note should atomically receive at least one default page, following the agreed note-creation API.
 
 ## 5. Repository operations and atomicity
 
@@ -104,22 +85,14 @@ The names below describe behaviors, **not finalized Kotlin signatures**:
 | Reorder elements | Transactional index changes and revision | Ordering fields of affected elements + note metadata |
 | Move element between pages | Atomic ownership (`page_id`) and order changes; preserve ID for a move | Affected element and order rows; note revision(s) according to ownership |
 | Move note to another notebook | Library operation, outside STO-02 element mutation path | Update note notebook link only |
-| Delete last remaining page | Reject or replace atomically (policy pending); never persist an active zero-page note | No change, or page insert/delete plus note metadata |
-| Duplicate note | Atomic clone under LIB-03 orchestration, with new note/page/element IDs | New note, pages, elements, and later coordinated asset refs |
 
 **Save-state invariant:** `Saving` means a command is pending, `Saved(revision)` means the Room transaction for that revision has actually committed, and `Save failed` means a commit failed. Never advance the reported saved revision when an insert/update throws or a transaction is rolled back. Editing gestures are batched into completed commands; no per-sample `@Insert` in a stylus loop.
 
-**Concurrent edits:** serialize writes for one note (e.g. a per-note queue) or use an equivalent concurrency-safe revision scheme. One logical editor command increments the note revision **exactly once inside its successful database transaction**, even if it changes multiple elements/pages. The caller receives an acknowledgment for that revision **only after** the transaction completes successfully. In-memory undo is not a persistence requirement; an undo action is another durable transaction.
+**Concurrent edits:** serialize writes for one note (e.g. a per-note queue) or use an equivalent concurrency-safe revision scheme. One logical editor command increments the note revision once after a successful database transaction, even if it changes multiple elements/pages. In-memory undo is not a persistence requirement; an undo action is another durable transaction.
 
 **Asset boundary:** local SQLite commits are not atomic with arbitrary file moves. When asset support is implemented, stage and verify immutable original bytes **before** committing DB references. Delete DB references **before** asynchronously deleting unreferenced originals; do not put irreplaceable assets in cache storage.
 
-## 6. Android validation boundary and proposed Room design (not yet code)
-
-**Validation before commit:** the Android persistence adapter must reject invalid canonical element envelopes, even when written directly by an editor command rather than imported through the Python portable-package validator. At minimum: supported element `type`, envelope `id` matching row ID, `type` matching indexed `kind`, finite invertible transforms, typed payload requirements, valid owner references, page dimensions/background, and applicable element-ID uniqueness within the note. If an element needs an image/PDF asset, do not claim a fully validated committed document before asset references are verifiable. Reuse the published shared-format rules; write Kotlin validation/tests rather than invoking Python from the app.
-
-**Failure rule:** validation failure, foreign-key failure, or injected transaction exception leaves persisted content and the acknowledged note revision unchanged. Database validation is independent of future ink rendering and PDF decoding; do not claim to validate PDF page-count bounds or fully decode media at this milestone.
-
-**Room design after LIB-03 contracts stabilize:**
+## 6. Proposed initial Room design, not yet code
 
 When LIB-03 is ready:
 
@@ -128,7 +101,6 @@ When LIB-03 is ready:
 3. Implement transaction-coordinated note/page creation and command commits using `RoomDatabase.withTransaction` or equivalent. Room/KSP versions and Gradle integration are reviewed against the **current** Android build, not chosen by this document.
 4. Add real database tests (in-memory Room for DAO semantics and disk-backed/reopen tests for persistence); keep the existing Python shared-format tests unaffected.
 5. Record initial Room schema export; test all later migrations explicitly. Never enable destructive migration fallback for real user notes.
-6. Keep page/element data operations and mapper tests owned by STO-02; use shared-domain types and note repositories when available rather than adding parallel models. Decide the single owner for `AppDatabase` and its version **before** editing shared Gradle/database code.
 
 ## 7. Test matrix for STO-02 implementation
 
@@ -146,39 +118,27 @@ When LIB-03 is ready:
 | S10 | Force-close and reopen app | Last acknowledged committed revision and same note/page/element identities are recovered. |
 | S11 | Attempt bad owner IDs/invalid input | Foreign-key constraints and semantic validators reject writes; existing data remains intact. |
 | S12 | Export database-backed note later | Ordered data can map to `manifest.pages[]` and `page.elements[]` without changes to canonical geometry; native cross-platform conformance stays a later milestone. |
-| S13 | Duplicate a multi-page note containing mixed elements | Duplicated note/page/element IDs differ; hierarchy, order, transform and payload semantics match; failed clone rolls back everything. Asset-backed duplication remains separately gated. |
-| S14 | Attempt to delete the last page | Operation follows the agreed reject-or-replace policy; an active note never commits zero pages. |
-| S15 | Reject structurally invalid canonical element content | Wrong kind/envelope ID, invalid transforms or payloads cause no element write and no note revision increment. |
 
-For issue #25, **S02–S07 and S10** directly demonstrate the stated acceptance criterion; S01, S08–S09, and S11–S15 protect M1 integration, the library boundary, and the eventual portability boundary.
+For issue #25, **S02–S07 and S10** directly demonstrate the stated acceptance criterion; S01, S08–S09, S11–S12 protect M1 integration and the eventual portability boundary.
 
-## 8. LIB-01/LIB-03 handshake and decision register
+## 8. Required handshake with LIB-01/LIB-03 developer
 
-**Joint review acknowledged:** both developers reviewed the proposed approach and agreed to incorporate the recommendations in this document. **This is not yet a finalized Kotlin contract**. Record the decisions below against actual LIB-01/LIB-03 types before implementing Room. Prefer adding precise package/type/method names after the collaborator's work is available rather than guessing here.
+Before Room code begins, record explicit agreement to each item:
 
-| ID | Agreement / item | Current status | Decision required before Room integration |
-|---|---|---|---|
-| D01 | LIB-03 owns note metadata and `NoteEntity`; STO-02 owns page/element persistence | Agreed direction | Confirm exact package/entity ownership on the active implementation branch |
-| D02 | A **single** shared `AppDatabase`, schema export and migration strategy | Agreed direction | Name the sole owner of `AppDatabase`, DB version and migration files |
-| D03 | Stable UUID identities and explicit collision remapping for clones/imports | Agreed direction | Choose Kotlin `String` / `UUID` / value-class ID types, converters and packages |
-| D04 | UTC timestamps and durable monotonic note revisions | Agreed direction | Choose epoch-milliseconds `Long` vs UTC text, exact revision type, and page/element revision meaning |
-| D05 | Note creation and initial-page insertion are atomic | Agreed direction | Choose orchestration owner, transaction entrypoint and default-page parameter contract |
-| D06 | STO-02 must implement/integrate with LIB-03 repository contracts | Agreed direction | Confirm interfaces, method signatures, results/errors and coroutine concurrency ownership |
-| D07 | `Saved(revision)` only after commit; failures never advance saved state | Agreed direction | Name layer responsible for save status and exact acknowledgment API |
-| D08 | Soft delete preserves pages/elements; duplication remaps note/page/element IDs | Agreed direction | Specify clone snapshot, last-page policy, hard delete and future asset-reference integration |
-| D09 | Ordered pages/elements with collision-safe transactional renumbering | Agreed direction | Approve zero-based contiguous indexes and tested reorder/transfer algorithm |
-| D10 | Android-side canonical validation before commit | Agreed direction | Identify serializer/validator owner and API; exclude media decode/PDF page-count claims |
+- [ ] Which Kotlin type and package represent `NoteId`, `PageId`, and `ElementId`? Are the IDs stored as UUID strings or inline/value classes?
+- [ ] Who owns the single `AppDatabase` / `NoteEntity` and database version; which code owns the atomic **create note + initial page** operation?
+- [ ] What Kotlin repository methods and result/error types will STO-02 implement or extend? Does the friend plan to expose note mutation transactions?
+- [ ] How are timestamps and revisions represented, and which layer reports `Saving/Saved/Failure`?
+- [ ] How are soft deletion, note duplication and ID remapping coordinated with the document-content tables?
+- [ ] How will ordered page/element indices be renumbered safely under SQLite uniqueness constraints?
 
-For each outstanding decision, record **selected option**, **Kotlin type or file path**, **owner**, and **reviewer approval** in the LIB-03 integration PR or this document. Agreement on a goal is not a substitute for picking a concrete code contract.
-
-**Dependency gate:** do not edit shared `AppDatabase`/`NoteEntity`, add Room dependencies, or implement adapter code against provisional duplicate interfaces until D02–D07 and D09 have concrete agreed answers. The remaining cases must have an integration plan and tests before merging STO-02.
+Status of all items: **Pending joint review.** No decisions are implied by this document's candidate names/types.
 
 ## 9. Checkpoint-1 exit criteria
 
-- [x] Both developers reviewed the mapping and agreed on the recommended architectural refinements (reported 2026-10-28).
-- [x] The proposed scope has not introduced another `NoteEntity`, Room database or library repository interface; this artifact is documentation only.
-- [ ] Actual LIB-01/LIB-03 Kotlin contracts and ownership decisions D02–D07/D09 are written down, including initial-page transaction and ID/timestamp conventions.
-- [ ] Reviewed documentation is committed and merged separately through the normal PR workflow.
-- [ ] Any Room implementation branch starts only after LIB-03 supplies or agrees to stable integration contracts.
+- [ ] Both developers reviewed this mapping and edited any incompatible assumptions.
+- [ ] The `notes` owner, shared DB instance, initial-page transaction and typed ID/timestamp conventions are recorded.
+- [ ] No duplicate `NoteEntity`, Room database or repository interface was introduced.
+- [ ] A follow-up implementation branch is started only after LIB-03 supplies or agrees to stable contracts.
 
-**Issue status:** STO-02 remains open/in preparation until real persistence tests pass and a reviewed implementation PR is merged. Documentation review/merge alone does not complete issue #25.
+**Issue status:** STO-02 remains open/in preparation until real persistence tests pass and a reviewed implementation PR is merged.

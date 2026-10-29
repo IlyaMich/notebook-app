@@ -2,6 +2,7 @@ package com.notebook.app.data.local
 
 import android.content.Context
 import androidx.room.Room
+import com.notebook.app.data.local.migration.AppDatabaseMigrations
 
 /** Single production DB instance. UI and STO-02 must use this provider. */
 object AppDatabaseProvider {
@@ -20,6 +21,7 @@ object AppDatabaseProvider {
     private fun build(context: Context, name: String): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, name)
             .addCallback(LibrarySchemaGuards.callback)
+            .addMigrations(AppDatabaseMigrations.MIGRATION_1_2)
             // Deliberately NO fallbackToDestructiveMigration().
             .build()
 }
