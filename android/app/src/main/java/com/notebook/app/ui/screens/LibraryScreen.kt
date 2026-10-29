@@ -71,6 +71,7 @@ fun LibraryScreen(
     var draftName by remember(parentFolderId) { mutableStateOf("") }
     var createError by remember(parentFolderId) { mutableStateOf<String?>(null) }
     var creating by remember(parentFolderId) { mutableStateOf(false) }
+    var management by remember(parentFolderId) { mutableStateOf<LibraryManagementRequest?>(null) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(folderRepository, notebookRepository, parentFolderId, refresh) {
@@ -150,6 +151,16 @@ fun LibraryScreen(
         )
     }
 
+    management?.let { request ->
+        LibraryManagementDialog(
+            request = request,
+            folderRepository = folderRepository,
+            notebookRepository = notebookRepository,
+            onDismiss = { management = null },
+            onSaved = { management = null; refresh++ },
+        )
+    }
+
     val folderName = listing?.currentFolder?.name
     Scaffold(
         topBar = {
@@ -196,6 +207,7 @@ fun LibraryScreen(
                         onRetry = { refresh++ },
                         onOpenFolder = onOpenFolder,
                         onOpenNotebook = onOpenNotebook,
+                        onManage = { management = it },
                     )
                 }
             } else {
@@ -211,6 +223,7 @@ fun LibraryScreen(
                     onRetry = { refresh++ },
                     onOpenFolder = onOpenFolder,
                     onOpenNotebook = onOpenNotebook,
+                    onManage = { management = it },
                 )
             }
         }
@@ -226,6 +239,7 @@ private fun LibraryFolderContents(
     onRetry: () -> Unit,
     onOpenFolder: (String) -> Unit,
     onOpenNotebook: (String) -> Unit,
+    onManage: (LibraryManagementRequest) -> Unit,
 ) {
     Column(
         modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp),
@@ -269,6 +283,20 @@ private fun LibraryFolderContents(
                             Column(Modifier.padding(16.dp)) {
                                 Text(folder.name, style = MaterialTheme.typography.titleMedium)
                                 Text("Open folder", style = MaterialTheme.typography.bodySmall)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    TextButton(
+                                        onClick = { onManage(LibraryManagementRequest(
+                                            folder.forManagement(), LibraryManagementAction.RENAME,
+                                        )) },
+                                        modifier = Modifier.testTag("library-rename-folder-${folder.id}"),
+                                    ) { Text("Rename") }
+                                    TextButton(
+                                        onClick = { onManage(LibraryManagementRequest(
+                                            folder.forManagement(), LibraryManagementAction.MOVE,
+                                        )) },
+                                        modifier = Modifier.testTag("library-move-folder-${folder.id}"),
+                                    ) { Text("Move") }
+                                }
                             }
                         }
                     }
@@ -291,6 +319,22 @@ private fun LibraryFolderContents(
                                 Text(notebook.name, style = MaterialTheme.typography.titleMedium)
                                 Text(if (notebook.isQuickNotes) "Default notebook" else "Open notebook",
                                     style = MaterialTheme.typography.bodySmall)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    TextButton(
+                                        onClick = { onManage(LibraryManagementRequest(
+                                            notebook.forManagement(), LibraryManagementAction.RENAME,
+                                        )) },
+                                        modifier = Modifier.testTag("library-rename-notebook-${notebook.id}"),
+                                    ) { Text("Rename") }
+                                    if (!notebook.isQuickNotes) {
+                                        TextButton(
+                                            onClick = { onManage(LibraryManagementRequest(
+                                                notebook.forManagement(), LibraryManagementAction.MOVE,
+                                            )) },
+                                            modifier = Modifier.testTag("library-move-notebook-${notebook.id}"),
+                                        ) { Text("Move") }
+                                    }
+                                }
                             }
                         }
                     }
