@@ -32,6 +32,9 @@ interface FolderDao {
     @Query("SELECT * FROM folders WHERE deletion_batch_id = :batchId AND deleted_at IS NOT NULL ORDER BY id ASC")
     suspend fun listTrashedByBatch(batchId: String): List<FolderEntity>
 
+    @Query("SELECT * FROM folders WHERE deleted_at IS NOT NULL AND deletion_batch_id IS NOT NULL ORDER BY deleted_at DESC, id ASC")
+    suspend fun listTrashed(): List<FolderEntity>
+
     @Query("SELECT COUNT(*) FROM folders")
     suspend fun countAll(): Int
 }

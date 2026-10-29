@@ -40,6 +40,7 @@ import com.notebook.app.data.library.model.Folder
 import com.notebook.app.data.library.model.Notebook
 import com.notebook.app.data.library.repository.FolderRepository
 import com.notebook.app.data.library.repository.NotebookRepository
+import com.notebook.app.data.library.repository.LibraryTrashRepository
 import kotlinx.coroutines.launch
 
 private enum class NewLibraryItem { FOLDER, NOTEBOOK }
@@ -60,6 +61,10 @@ fun LibraryScreen(
     onOpenFolder: (String) -> Unit,
     parentFolderId: String? = null,
     onBack: () -> Unit = {},
+    trashRepository: LibraryTrashRepository? = null,
+    onOpenTrash: () -> Unit = {},
+    onLibraryChanged: () -> Unit = {},
+    contentVersion: Int = 0,
 ) {
     // Key navigation state by folder to prevent a prior folder's rows flashing in a new folder.
     var listing by remember(parentFolderId, folderRepository, notebookRepository) {
@@ -72,9 +77,12 @@ fun LibraryScreen(
     var createError by remember(parentFolderId) { mutableStateOf<String?>(null) }
     var creating by remember(parentFolderId) { mutableStateOf(false) }
     var management by remember(parentFolderId) { mutableStateOf<LibraryManagementRequest?>(null) }
+    var trashRequest by remember(parentFolderId) { mutableStateOf<TrashRequest?>(null) }
+    var trashError by remember(parentFolderId) { mutableStateOf<String?>(null) }
+    var trashBusy by remember(parentFolderId) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(folderRepository, notebookRepository, parentFolderId, refresh) {
+    LaunchedEffect(folderRepository, notebookRepository, parentFolderId, refresh, contentVersion) {
         listing = null
         loadError = null
         try {
@@ -161,11 +169,48 @@ fun LibraryScreen(
         )
     }
 
+    trashRequest?.let { request ->
+        TrashConfirmationDialog(
+            request = request, busy = trashBusy, error = trashError,
+            onCancel = { trashRequest = null; trashError = null },
+            onConfirm = {
+                if (!trashBusy && trashRepository != null) {
+                    trashBusy = true
+                    trashError = null
+                    scope.launch {
+                        try {
+                            when (request.kind) {
+                                TrashTargetKind.FOLDER -> trashRepository.trashFolder(request.id)
+                                TrashTargetKind.NOTEBOOK -> trashRepository.trashNotebook(request.id)
+                                TrashTargetKind.NOTE -> trashRepository.trashNote(request.id)
+                            }
+                            trashRequest = null
+                            refresh++
+                            onLibraryChanged()
+                        } catch (exception: Exception) {
+                            trashError = exception.message ?: "Move to Trash failed"
+                        } finally {
+                            trashBusy = false
+                        }
+                    }
+                }
+            },
+        )
+    }
+
     val folderName = listing?.currentFolder?.name
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(folderName ?: if (parentFolderId == null) "Notebook Library" else "Folder") },
+                actions = {
+                    if (parentFolderId == null && trashRepository != null) {
+                        TextButton(
+                            onClick = onOpenTrash,
+                            modifier = Modifier.testTag("library-open-trash"),
+                        ) { Text("Trash") }
+                    }
+                },
                 navigationIcon = {
                     if (parentFolderId != null) {
                         TextButton(onClick = onBack, modifier = Modifier.testTag("library-back")) {
@@ -191,7 +236,7 @@ fun LibraryScreen(
                             Text(if (parentFolderId == null) "Root" else "Current folder")
                             Text(folderName ?: "Folders and notebooks",
                                 style = MaterialTheme.typography.bodySmall)
-                            Text("Recent and Trash: later checkpoints",
+                            Text("Recent: later checkpoint",
                                 style = MaterialTheme.typography.bodySmall)
                         }
                     }
@@ -208,6 +253,8 @@ fun LibraryScreen(
                         onOpenFolder = onOpenFolder,
                         onOpenNotebook = onOpenNotebook,
                         onManage = { management = it },
+                        onTrash = { trashRequest = it; trashError = null },
+                        canTrash = trashRepository != null,
                     )
                 }
             } else {
@@ -224,6 +271,8 @@ fun LibraryScreen(
                     onOpenFolder = onOpenFolder,
                     onOpenNotebook = onOpenNotebook,
                     onManage = { management = it },
+                    onTrash = { trashRequest = it; trashError = null },
+                    canTrash = trashRepository != null,
                 )
             }
         }
@@ -240,6 +289,8 @@ private fun LibraryFolderContents(
     onOpenFolder: (String) -> Unit,
     onOpenNotebook: (String) -> Unit,
     onManage: (LibraryManagementRequest) -> Unit,
+    onTrash: (TrashRequest) -> Unit,
+    canTrash: Boolean,
 ) {
     Column(
         modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp),
@@ -283,7 +334,10 @@ private fun LibraryFolderContents(
                             Column(Modifier.padding(16.dp)) {
                                 Text(folder.name, style = MaterialTheme.typography.titleMedium)
                                 Text("Open folder", style = MaterialTheme.typography.bodySmall)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
                                     TextButton(
                                         onClick = { onManage(LibraryManagementRequest(
                                             folder.forManagement(), LibraryManagementAction.RENAME,
@@ -296,6 +350,14 @@ private fun LibraryFolderContents(
                                         )) },
                                         modifier = Modifier.testTag("library-move-folder-${folder.id}"),
                                     ) { Text("Move") }
+                                    if (canTrash) {
+                                        TextButton(
+                                            onClick = { onTrash(TrashRequest(
+                                                TrashTargetKind.FOLDER, folder.id, folder.name,
+                                            )) },
+                                            modifier = Modifier.testTag("library-trash-folder-${folder.id}"),
+                                        ) { Text("Move to Trash") }
+                                    }
                                 }
                             }
                         }
@@ -319,7 +381,10 @@ private fun LibraryFolderContents(
                                 Text(notebook.name, style = MaterialTheme.typography.titleMedium)
                                 Text(if (notebook.isQuickNotes) "Default notebook" else "Open notebook",
                                     style = MaterialTheme.typography.bodySmall)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
                                     TextButton(
                                         onClick = { onManage(LibraryManagementRequest(
                                             notebook.forManagement(), LibraryManagementAction.RENAME,
@@ -333,6 +398,14 @@ private fun LibraryFolderContents(
                                             )) },
                                             modifier = Modifier.testTag("library-move-notebook-${notebook.id}"),
                                         ) { Text("Move") }
+                                        if (canTrash) {
+                                            TextButton(
+                                                onClick = { onTrash(TrashRequest(
+                                                    TrashTargetKind.NOTEBOOK, notebook.id, notebook.name,
+                                                )) },
+                                                modifier = Modifier.testTag("library-trash-notebook-${notebook.id}"),
+                                            ) { Text("Move to Trash") }
+                                        }
                                     }
                                 }
                             }

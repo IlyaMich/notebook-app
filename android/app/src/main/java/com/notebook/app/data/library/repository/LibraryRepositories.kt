@@ -50,8 +50,24 @@ interface NoteLifecycleRepository {
     suspend fun duplicateNote(sourceNoteId: String, targetNotebookId: String? = null): Note
 }
 
-/** Draft boundary for LIB-07. A purge API awaits asset-reference ownership. */
+/** Single user-visible deletion action. Descendants in the same batch are restored together. */
+enum class TrashedItemKind { FOLDER, NOTEBOOK, NOTE }
+
+data class TrashedBatch(
+    val id: String,
+    val deletedAtMillis: Long,
+    val kind: TrashedItemKind,
+    val rootId: String,
+    val title: String,
+    val folderCount: Int,
+    val notebookCount: Int,
+    val noteCount: Int,
+)
+
+/** Non-destructive Trash access. Permanent purge waits for asset-reference ownership. */
 interface LibraryTrashRepository {
+    /** One entry per deletion batch, newest first; never expose underlying DAOs to UI. */
+    suspend fun listTrashedBatches(): List<TrashedBatch>
     suspend fun trashFolder(folderId: String): String // deletion batch UUID
     suspend fun trashNotebook(notebookId: String): String
     suspend fun trashNote(noteId: String): String

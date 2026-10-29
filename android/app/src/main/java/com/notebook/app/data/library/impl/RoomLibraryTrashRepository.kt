@@ -5,6 +5,8 @@ import com.notebook.app.data.library.LibraryErrorCode
 import com.notebook.app.data.library.LibraryValidation
 import com.notebook.app.data.library.model.Notebook
 import com.notebook.app.data.library.repository.LibraryTrashRepository
+import com.notebook.app.data.library.repository.TrashedBatch
+import com.notebook.app.data.library.repository.TrashedItemKind
 import com.notebook.app.data.local.AppDatabase
 import com.notebook.app.data.local.entity.FolderEntity
 import com.notebook.app.data.local.entity.NoteEntity
@@ -25,6 +27,55 @@ class RoomLibraryTrashRepository(
     private val folders get() = db.folderDao()
     private val notebooks get() = db.notebookDao()
     private val notes get() = db.noteDao()
+
+    override suspend fun listTrashedBatches(): List<TrashedBatch> = db.withTransaction {
+        // Read all three tables in one snapshot; a folder deletion is one UI row,
+        // not independent items for every descendant.
+        val trashedFolders = folders.listTrashed()
+        val trashedNotebooks = notebooks.listTrashed()
+        val trashedNotes = notes.listTrashed()
+        val batchIds = (trashedFolders.mapNotNull { it.deletionBatchId } +
+            trashedNotebooks.mapNotNull { it.deletionBatchId } +
+            trashedNotes.mapNotNull { it.deletionBatchId }).toSet()
+
+        batchIds.map { batchId ->
+            val folderRows = trashedFolders.filter { it.deletionBatchId == batchId }
+            val notebookRows = trashedNotebooks.filter { it.deletionBatchId == batchId }
+            val noteRows = trashedNotes.filter { it.deletionBatchId == batchId }
+            val folderIds = folderRows.map { it.id }.toSet()
+            val notebookIds = notebookRows.map { it.id }.toSet()
+            // Each Trash operation has one root. Find it by excluding objects
+            // whose owning parent belongs to the same deletion batch.
+            val rootFolder = folderRows.firstOrNull { it.parentFolderId !in folderIds }
+            val rootNotebook = notebookRows.firstOrNull { it.parentFolderId !in folderIds }
+            val rootNote = noteRows.firstOrNull { it.notebookId !in notebookIds }
+            val latestDeletion = (folderRows.mapNotNull { it.deletedAtMillis } +
+                notebookRows.mapNotNull { it.deletedAtMillis } +
+                noteRows.mapNotNull { it.deletedAtMillis }).maxOrNull()
+                ?: error("Deletion batch has no timestamp")
+            when {
+                rootFolder != null -> TrashedBatch(
+                    id = batchId, deletedAtMillis = latestDeletion,
+                    kind = TrashedItemKind.FOLDER, rootId = rootFolder.id,
+                    title = rootFolder.name, folderCount = folderRows.size,
+                    notebookCount = notebookRows.size, noteCount = noteRows.size,
+                )
+                rootNotebook != null -> TrashedBatch(
+                    id = batchId, deletedAtMillis = latestDeletion,
+                    kind = TrashedItemKind.NOTEBOOK, rootId = rootNotebook.id,
+                    title = rootNotebook.name, folderCount = 0,
+                    notebookCount = notebookRows.size, noteCount = noteRows.size,
+                )
+                rootNote != null -> TrashedBatch(
+                    id = batchId, deletedAtMillis = latestDeletion,
+                    kind = TrashedItemKind.NOTE, rootId = rootNote.id,
+                    title = rootNote.title.ifBlank { "Untitled Note" },
+                    folderCount = 0, notebookCount = 0, noteCount = noteRows.size,
+                )
+                else -> error("Deletion batch has no identifiable root: $batchId")
+            }
+        }.sortedWith(compareByDescending<TrashedBatch> { it.deletedAtMillis }.thenBy { it.id })
+    }
 
     override suspend fun trashNote(noteId: String): String = db.withTransaction {
         val note = requireActiveNote(noteId)

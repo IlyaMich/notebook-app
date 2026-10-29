@@ -34,6 +34,9 @@ interface NotebookDao {
     @Query("SELECT * FROM notebooks WHERE deletion_batch_id = :batchId AND deleted_at IS NOT NULL ORDER BY id ASC")
     suspend fun listTrashedByBatch(batchId: String): List<NotebookEntity>
 
+    @Query("SELECT * FROM notebooks WHERE deleted_at IS NOT NULL AND deletion_batch_id IS NOT NULL ORDER BY deleted_at DESC, id ASC")
+    suspend fun listTrashed(): List<NotebookEntity>
+
     @Query("SELECT COUNT(*) FROM notebooks")
     suspend fun countAll(): Int
 }
