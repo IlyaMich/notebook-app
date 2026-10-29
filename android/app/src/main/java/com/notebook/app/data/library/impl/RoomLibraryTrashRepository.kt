@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import com.notebook.app.data.library.LibraryErrorCode
 import com.notebook.app.data.library.LibraryValidation
 import com.notebook.app.data.library.model.Notebook
+import com.notebook.app.data.library.repository.PurgePreview
 import com.notebook.app.data.library.repository.LibraryTrashRepository
 import com.notebook.app.data.library.repository.TrashedBatch
 import com.notebook.app.data.library.repository.TrashedItemKind
@@ -16,13 +17,14 @@ import java.util.ArrayDeque
 /**
  * LIB-07 non-destructive Trash transactions. All writes share LIB-03/STO-02's
  * AppDatabase; nothing in this adapter deletes notes, pages, elements or assets.
- * Permanent purge is deliberately NOT implemented until reference-aware asset
- * lifetime management has an agreed contract.
+ * Purge is available only for the validated asset-free Room V2 content subset;
+ * it does not remove files or mutate an asset registry.
  */
 class RoomLibraryTrashRepository(
     private val db: AppDatabase,
     private val clock: () -> Long = System::currentTimeMillis,
     private val createId: () -> String = LibraryRepositorySupport::newId,
+    private val onPurgeStep: (PurgeStep) -> Unit = {},
 ) : LibraryTrashRepository {
     private val folders get() = db.folderDao()
     private val notebooks get() = db.notebookDao()
@@ -75,6 +77,20 @@ class RoomLibraryTrashRepository(
                 else -> error("Deletion batch has no identifiable root: $batchId")
             }
         }.sortedWith(compareByDescending<TrashedBatch> { it.deletedAtMillis }.thenBy { it.id })
+    }
+
+    override suspend fun previewPurge(deletionBatchId: String): PurgePreview = db.withTransaction {
+        RoomPermanentPurge(db).preflight(deletionBatchId).preview
+    }
+
+    override suspend fun purgeBatch(confirmedPreview: PurgePreview): Unit = db.withTransaction {
+        val purge = RoomPermanentPurge(db)
+        val current = purge.preflight(confirmedPreview.deletionBatchId)
+        if (current.preview != confirmedPreview) {
+            LibraryRepositorySupport.error(LibraryErrorCode.INVALID_INPUT,
+                "Trash changed after confirmation preview; review it again")
+        }
+        purge.delete(current, onPurgeStep)
     }
 
     override suspend fun trashNote(noteId: String): String = db.withTransaction {

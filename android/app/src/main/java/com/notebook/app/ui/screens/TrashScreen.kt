@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -28,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.notebook.app.data.library.repository.LibraryTrashRepository
+import com.notebook.app.data.library.repository.PurgePreview
 import com.notebook.app.data.library.repository.TrashedBatch
 import com.notebook.app.data.library.repository.TrashedItemKind
 import kotlinx.coroutines.launch
@@ -44,6 +46,9 @@ fun TrashScreen(
     var loadError by remember(trashRepository) { mutableStateOf<String?>(null) }
     var operationError by remember(trashRepository) { mutableStateOf<String?>(null) }
     var restoringId by remember(trashRepository) { mutableStateOf<String?>(null) }
+    var preview by remember(trashRepository) { mutableStateOf<PurgePreview?>(null) }
+    var loadingPreviewId by remember(trashRepository) { mutableStateOf<String?>(null) }
+    var deletingId by remember(trashRepository) { mutableStateOf<String?>(null) }
     var refresh by remember(trashRepository) { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
 
@@ -57,6 +62,56 @@ fun TrashScreen(
         }
     }
 
+    preview?.let { selected ->
+        AlertDialog(
+            modifier = Modifier.testTag("trash-purge-dialog"),
+            onDismissRequest = { if (deletingId == null) preview = null },
+            title = { Text("Delete permanently?") },
+            text = {
+                Text(
+                    "${selected.title} and its deletion batch will be permanently deleted. " +
+                        "${selected.folderCount} folders, ${selected.notebookCount} notebooks, " +
+                        "${selected.noteCount} notes, ${selected.pageCount} pages and " +
+                        "${selected.elementCount} elements will be removed. " +
+                        "${selected.survivingFolderCount + selected.survivingNotebookCount + selected.survivingNoteCount} " +
+                        "independently trashed items will be preserved. " +
+                        "This cannot be undone."
+                )
+            },
+            dismissButton = {
+                TextButton(
+                    modifier = Modifier.testTag("trash-purge-cancel"),
+                    enabled = deletingId == null,
+                    onClick = { preview = null },
+                ) { Text("Cancel") }
+            },
+            confirmButton = {
+                TextButton(
+                    modifier = Modifier.testTag("trash-purge-confirm"),
+                    enabled = deletingId == null,
+                    onClick = {
+                        if (deletingId != null) return@TextButton
+                        deletingId = selected.deletionBatchId
+                        operationError = null
+                        scope.launch {
+                            try {
+                                trashRepository.purgeBatch(selected)
+                                preview = null
+                                refresh++
+                                onRestored() // also notify parent library that content changed
+                            } catch (exception: Exception) {
+                                preview = null
+                                operationError = exception.message ?: "Permanent deletion failed"
+                            } finally {
+                                deletingId = null
+                            }
+                        }
+                    },
+                ) { Text(if (deletingId == null) "Delete permanently" else "Deleting…") }
+            },
+        )
+    }
+
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("Trash") },
@@ -68,7 +123,8 @@ fun TrashScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Items remain here until you restore them. Permanent deletion is not available yet.",
+            Text("Restore items or permanently delete a supported asset-free batch. " +
+                "Permanent deletion cannot be undone.",
                 style = MaterialTheme.typography.bodyMedium)
             if (loadError != null) {
                 Text(loadError.orEmpty(), color = MaterialTheme.colorScheme.error)
@@ -100,9 +156,10 @@ fun TrashScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }
+                            Column {
                             TextButton(
                                 modifier = Modifier.testTag("trash-restore-${batch.id}"),
-                                enabled = restoringId == null,
+                                enabled = restoringId == null && deletingId == null && loadingPreviewId == null,
                                 onClick = {
                                     if (restoringId != null) return@TextButton
                                     restoringId = batch.id
@@ -120,6 +177,24 @@ fun TrashScreen(
                                     }
                                 },
                             ) { Text(if (restoringId == batch.id) "Restoring…" else "Restore") }
+                            TextButton(
+                                modifier = Modifier.testTag("trash-delete-${batch.id}"),
+                                enabled = restoringId == null && deletingId == null && loadingPreviewId == null,
+                                onClick = {
+                                    loadingPreviewId = batch.id
+                                    operationError = null
+                                    scope.launch {
+                                        try {
+                                            preview = trashRepository.previewPurge(batch.id)
+                                        } catch (exception: Exception) {
+                                            operationError = exception.message ?: "This item cannot be permanently deleted yet"
+                                        } finally {
+                                            loadingPreviewId = null
+                                        }
+                                    }
+                                },
+                            ) { Text(if (loadingPreviewId == batch.id) "Checking…" else "Delete permanently") }
+                            }
                         }
                     }
                 }

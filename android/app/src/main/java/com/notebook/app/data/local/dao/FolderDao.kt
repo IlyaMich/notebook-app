@@ -35,6 +35,16 @@ interface FolderDao {
     @Query("SELECT * FROM folders WHERE deleted_at IS NOT NULL AND deletion_batch_id IS NOT NULL ORDER BY deleted_at DESC, id ASC")
     suspend fun listTrashed(): List<FolderEntity>
 
+    /** Includes independently trashed children; purge must not rely on active-only reads. */
+    @Query("SELECT * FROM folders WHERE parent_folder_id = :ownerId ORDER BY id ASC")
+    suspend fun listAllByOwner(ownerId: String): List<FolderEntity>
+
+    @Query("SELECT COUNT(*) FROM folders WHERE deletion_batch_id = :batchId AND deleted_at IS NULL")
+    suspend fun countActiveWithBatch(batchId: String): Int
+
+    @Query("DELETE FROM folders WHERE id = :id")
+    suspend fun deleteById(id: String): Int
+
     @Query("SELECT COUNT(*) FROM folders")
     suspend fun countAll(): Int
 }

@@ -64,7 +64,25 @@ data class TrashedBatch(
     val noteCount: Int,
 )
 
-/** Non-destructive Trash access. Permanent purge waits for asset-reference ownership. */
+/** Confirmation snapshot for one asset-free deletion batch. Do not synthesize in the UI.
+ * The fingerprint binds exact current membership and persisted content to the preview.
+ */
+data class PurgePreview(
+    val deletionBatchId: String,
+    val kind: TrashedItemKind,
+    val title: String,
+    val folderCount: Int,
+    val notebookCount: Int,
+    val noteCount: Int,
+    val pageCount: Int,
+    val elementCount: Int,
+    val survivingFolderCount: Int,
+    val survivingNotebookCount: Int,
+    val survivingNoteCount: Int,
+    val fingerprint: String,
+)
+
+/** Trash access: soft-delete/restore plus explicitly confirmed asset-free batch purge. */
 interface LibraryTrashRepository {
     /** One entry per deletion batch, newest first; never expose underlying DAOs to UI. */
     suspend fun listTrashedBatches(): List<TrashedBatch>
@@ -72,4 +90,8 @@ interface LibraryTrashRepository {
     suspend fun trashNotebook(notebookId: String): String
     suspend fun trashNote(noteId: String): String
     suspend fun restoreBatch(deletionBatchId: String)
+    /** Read-only, fail-closed preview; unsupported/corrupt content prevents confirmation. */
+    suspend fun previewPurge(deletionBatchId: String): PurgePreview
+    /** Rechecks the exact preview inside one write transaction; no partial purge. */
+    suspend fun purgeBatch(confirmedPreview: PurgePreview)
 }

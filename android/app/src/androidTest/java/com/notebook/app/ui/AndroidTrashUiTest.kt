@@ -197,6 +197,29 @@ class AndroidTrashUiTest {
         assertEquals(0L, runBlocking { db.noteDao().findById(note.id)?.revision })
     }
 
+    @Test fun permanentDeleteNeedsConfirmationAndRefreshesTrash() {
+        val notebook = runBlocking { repositories.notebooks.create("Temporary") }
+        val note = runBlocking { repositories.noteLifecycle().createNote(notebook.id, "Discard") }
+        val batch = runBlocking { repositories.trash.trashNote(note.id) }
+        compose.setContent {
+            MaterialTheme {
+                TrashScreen(trashRepository = repositories.trash, onBack = {})
+            }
+        }
+        awaitTag("trash-delete-$batch")
+        compose.onNodeWithTag("trash-delete-$batch").performClick()
+        awaitTag("trash-purge-dialog")
+        compose.onNodeWithTag("trash-purge-cancel").performClick()
+        assertNotNull(runBlocking { db.noteDao().findById(note.id) })
+        compose.onNodeWithTag("trash-delete-$batch").performClick()
+        awaitTag("trash-purge-dialog")
+        compose.onNodeWithTag("trash-purge-confirm").performClick()
+        compose.waitUntil(10_000L) { runBlocking { db.noteDao().findById(note.id) == null } }
+        awaitTag("trash-empty")
+        assertEquals(0, runBlocking { repositories.trash.listTrashedBatches().size })
+        assertEquals(0, runBlocking { db.pageDao().countByNote(note.id) })
+    }
+
     @Test fun quickNotesHasNoTrashAction() {
         val quick = runBlocking { repositories.notebooks.ensureQuickNotes() }
         showRootAndTrash()
