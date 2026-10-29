@@ -50,10 +50,48 @@ interface NoteLifecycleRepository {
     suspend fun duplicateNote(sourceNoteId: String, targetNotebookId: String? = null): Note
 }
 
-/** Draft boundary for LIB-07. A purge API awaits asset-reference ownership. */
+/** Single user-visible deletion action. Descendants in the same batch are restored together. */
+enum class TrashedItemKind { FOLDER, NOTEBOOK, NOTE }
+
+data class TrashedBatch(
+    val id: String,
+    val deletedAtMillis: Long,
+    val kind: TrashedItemKind,
+    val rootId: String,
+    val title: String,
+    val folderCount: Int,
+    val notebookCount: Int,
+    val noteCount: Int,
+)
+
+/** Confirmation snapshot for one asset-free deletion batch. Do not synthesize in the UI.
+ * The fingerprint binds exact current membership and persisted content to the preview.
+ */
+data class PurgePreview(
+    val deletionBatchId: String,
+    val kind: TrashedItemKind,
+    val title: String,
+    val folderCount: Int,
+    val notebookCount: Int,
+    val noteCount: Int,
+    val pageCount: Int,
+    val elementCount: Int,
+    val survivingFolderCount: Int,
+    val survivingNotebookCount: Int,
+    val survivingNoteCount: Int,
+    val fingerprint: String,
+)
+
+/** Trash access: soft-delete/restore plus explicitly confirmed asset-free batch purge. */
 interface LibraryTrashRepository {
+    /** One entry per deletion batch, newest first; never expose underlying DAOs to UI. */
+    suspend fun listTrashedBatches(): List<TrashedBatch>
     suspend fun trashFolder(folderId: String): String // deletion batch UUID
     suspend fun trashNotebook(notebookId: String): String
     suspend fun trashNote(noteId: String): String
     suspend fun restoreBatch(deletionBatchId: String)
+    /** Read-only, fail-closed preview; unsupported/corrupt content prevents confirmation. */
+    suspend fun previewPurge(deletionBatchId: String): PurgePreview
+    /** Rechecks the exact preview inside one write transaction; no partial purge. */
+    suspend fun purgeBatch(confirmedPreview: PurgePreview)
 }

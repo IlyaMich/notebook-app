@@ -28,6 +28,22 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE deleted_at IS NULL ORDER BY COALESCE(last_opened_at, updated_at) DESC, id ASC LIMIT :limit")
     suspend fun listRecent(limit: Int): List<NoteEntity>
 
+    @Query("SELECT * FROM notes WHERE deletion_batch_id = :batchId AND deleted_at IS NOT NULL ORDER BY id ASC")
+    suspend fun listTrashedByBatch(batchId: String): List<NoteEntity>
+
+    @Query("SELECT * FROM notes WHERE deleted_at IS NOT NULL AND deletion_batch_id IS NOT NULL ORDER BY deleted_at DESC, id ASC")
+    suspend fun listTrashed(): List<NoteEntity>
+
+    /** Includes independently trashed children; purge must not rely on active-only reads. */
+    @Query("SELECT * FROM notes WHERE notebook_id = :ownerId ORDER BY id ASC")
+    suspend fun listAllByOwner(ownerId: String): List<NoteEntity>
+
+    @Query("SELECT COUNT(*) FROM notes WHERE deletion_batch_id = :batchId AND deleted_at IS NULL")
+    suspend fun countActiveWithBatch(batchId: String): Int
+
+    @Query("DELETE FROM notes WHERE id = :id")
+    suspend fun deleteById(id: String): Int
+
     @Query("SELECT COUNT(*) FROM notes")
     suspend fun countAll(): Int
 }

@@ -9,6 +9,7 @@ import com.notebook.app.data.library.repository.NotebookRepository
 import com.notebook.app.data.library.repository.NoteContentTransactionPort
 import com.notebook.app.data.library.repository.NoteLifecycleRepository
 import com.notebook.app.data.library.repository.NoteRepository
+import com.notebook.app.data.library.repository.LibraryTrashRepository
 import com.notebook.app.data.local.AppDatabase
 import com.notebook.app.data.local.AppDatabaseProvider
 
@@ -18,6 +19,7 @@ class LibraryRepositoryFactory(private val database: AppDatabase) {
     val notebooks: NotebookRepository = RoomNotebookRepository(database)
     val notes: NoteRepository = RoomNoteRepository(database)
     val documents: DocumentRepository = RoomDocumentRepository(database)
+    val trash: LibraryTrashRepository = RoomLibraryTrashRepository(database)
 
     /** Production wiring: the real STO-02 adapter uses this same database. */
     fun noteLifecycle(): NoteLifecycleRepository =
