@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug-build-only second launcher entry. Never part of release builds. -->
+        <activity
+            android:name="com.notebook.app.ui.editor.ink.InkProbeActivity"
+            android:exported="true"
+            android:label="Notebook Ink Probe">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
