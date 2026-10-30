@@ -1,0 +1,86 @@
+{
+  "contract": "FMT-04 sampledPointsV1 synthetic canonical ink fixtures",
+  "invalid": [
+    {
+      "error_contains": "Non-monotonic stroke tMs",
+      "path": "invalid/ink_decreasing_time.notebook",
+      "reason": "Decreasing timestamps are not permitted"
+    },
+    {
+      "error_contains": "Schema violation",
+      "path": "invalid/ink_negative_time.notebook",
+      "reason": "Negative elapsed time is not permitted"
+    },
+    {
+      "error_contains": "Schema violation",
+      "path": "invalid/ink_unknown_encoding.notebook",
+      "reason": "Unknown required stroke encoding cannot be silently accepted"
+    },
+    {
+      "error_contains": "Schema violation",
+      "path": "invalid/ink_unknown_brush.notebook",
+      "reason": "Unsupported canonical brush is not part of the agreed subset"
+    },
+    {
+      "error_contains": "Schema violation",
+      "path": "invalid/ink_negative_pressure.notebook",
+      "reason": "Pressure below zero is invalid"
+    },
+    {
+      "error_contains": "Schema violation",
+      "path": "invalid/ink_excess_pressure.notebook",
+      "reason": "Pressure above one is invalid"
+    },
+    {
+      "error_contains": "Schema violation",
+      "path": "invalid/ink_excess_tilt.notebook",
+      "reason": "Tilt exceeds the canonical upper bound of pi/2"
+    },
+    {
+      "error_contains": "Schema violation",
+      "path": "invalid/ink_zero_width.notebook",
+      "reason": "Brush width must be positive"
+    },
+    {
+      "error_contains": "Schema violation",
+      "path": "invalid/ink_empty_points.notebook",
+      "reason": "A stroke requires at least one point"
+    },
+    {
+      "error_contains": "Non-finite JSON number",
+      "path": "invalid/ink_nan_coordinate.notebook",
+      "reason": "NaN is not a canonical coordinate"
+    },
+    {
+      "error_contains": "Non-finite JSON number",
+      "path": "invalid/ink_infinite_coordinate.notebook",
+      "reason": "Infinity is not a canonical coordinate"
+    }
+  ],
+  "valid": [
+    {
+      "path": "valid/ink_pen_straight_v1.notebook",
+      "reason": "Straight pen with constant pressure and exact integer timestamps"
+    },
+    {
+      "path": "valid/ink_pen_curve_v1.notebook",
+      "reason": "Curved pen with varying pressure and valid repeated timestamps"
+    },
+    {
+      "path": "valid/ink_pencil_tilt_v1.notebook",
+      "reason": "Pencil with optional tilt and signed page-space orientation"
+    },
+    {
+      "path": "valid/ink_highlighter_v1.notebook",
+      "reason": "Translucent highlighter preserving semantic brush values"
+    },
+    {
+      "path": "valid/ink_single_sample_v1.notebook",
+      "reason": "Single-point stroke with all optional characteristics absent"
+    },
+    {
+      "path": "valid/ink_page_local_v1.notebook",
+      "reason": "Two mixed-size pages and independent page-local strokes"
+    }
+  ]
+}
