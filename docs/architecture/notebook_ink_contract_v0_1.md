@@ -4,7 +4,7 @@
 **Issue:** [FMT-04 — Define common stroke conversion and brush subset](https://github.com/IlyaMich/notebook-app/issues/14)  
 **Milestone:** M2 — Editable Ink Vertical Slice  
 **Ownership:** Joint (Android and Apple developers)  
-**Status:** Team-approved direction; proposed repository contract pending PR review and fixtures  
+**Status:** Team-approved direction; fixtures and validation tests verified locally; pending peer review and merge.  
 **Scope:** Platform-neutral stroke semantics, adapter boundaries, failure behavior, and evaluation gates. This document does **not** select a production handwriting engine or freeze the portable wire schema.
 
 ## 1. Purpose and relationship to existing contracts
