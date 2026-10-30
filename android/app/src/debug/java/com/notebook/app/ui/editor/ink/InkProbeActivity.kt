@@ -1,8 +1,10 @@
 package com.notebook.app.ui.editor.ink
 
+import android.graphics.Matrix
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.lifecycle.ViewModelProvider
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -16,12 +18,14 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import android.graphics.Matrix
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.withSave
 import androidx.ink.authoring.compose.InProgressStrokes
@@ -29,22 +33,24 @@ import androidx.ink.brush.Brush
 import androidx.ink.brush.StockBrushes
 import androidx.ink.brush.compose.createWithComposeColor
 import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
-import androidx.ink.strokes.Stroke
 
-/** EDT-05 CP1A: debug-only Ink API viability probe, no document/repository calls. */
+/** CP1B remains debug-only and never accesses Room, repository, or note revisions. */
 class InkProbeActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            MaterialTheme { InkProbeScreen() }
-        }
+        // Activity-scoped state survives configuration recreation but not an actual finish.
+        val session = ViewModelProvider(this)[InkProbeSessionViewModel::class.java]
+        setContent { MaterialTheme { InkProbeScreen(session) } }
     }
 }
 
 @Composable
-private fun InkProbeScreen() {
-    val dryStrokes = remember { mutableStateListOf<Stroke>() }
-    val brush = remember {
+private fun InkProbeScreen(session: InkProbeSessionViewModel) {
+    // Canonical DU samples survive activity recreation in the retained ViewModel.
+    // They are still in memory only: no Room, SavedState or on-disk representation.
+    val canonicalStrokes = session.canonicalStrokes
+    var canvasWidthPx by remember { mutableIntStateOf(0) }
+    val liveBrush = remember {
         Brush.createWithComposeColor(
             family = StockBrushes.pressurePen(),
             color = Color(0xFF2255AA),
@@ -55,38 +61,68 @@ private fun InkProbeScreen() {
     val renderer = remember { CanvasStrokeRenderer.create() }
     val identityTransform = remember { Matrix() }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    // Disposable native reconstruction cache. Rebuild from canonical whenever width changes.
+    val rebuilt = remember(canonicalStrokes.size, canvasWidthPx) {
+        if (canvasWidthPx > 0) {
+            val scale = InkPixelScale(canvasWidthPx.toDouble() / 612.0)
+            canonicalStrokes.map { JetpackInkProbeAdapter.rebuild(it, scale) }
+        } else emptyList()
+    }
+
+    Column(Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Column {
                 Text("Ink probe (debug only)", style = MaterialTheme.typography.titleMedium)
-                Text("${dryStrokes.size} finished strokes")
+                Text("${canonicalStrokes.size} finished strokes")
                 Text("In memory only - nothing is saved")
+                Text("Canonical DU -> rebuilt Jetpack Ink")
+                session.captureError?.let { Text("Ink conversion error: $it") }
             }
-            Button(onClick = { dryStrokes.clear() }) { Text("Clear") }
+            Button(onClick = {
+                session.clear()
+            }) { Text("Clear") }
         }
         Box(
-            modifier = Modifier.weight(1f).fillMaxWidth().background(Color.White),
+            modifier = Modifier.weight(1f).fillMaxWidth()
+                .background(Color.White)
+                .onSizeChanged { canvasWidthPx = it.width },
         ) {
-            // Dry strokes are added synchronously in onStrokesFinished, avoiding wet/dry flicker.
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                dryStrokes.forEach { stroke ->
-                    // The renderer can mutate the underlying Android Canvas transform.
+            Canvas(Modifier.fillMaxSize()) {
+                rebuilt.forEach { stroke ->
                     drawContext.canvas.nativeCanvas.withSave {
                         renderer.draw(
-                            stroke = stroke,
                             canvas = this,
+                            stroke = stroke,
                             strokeToScreenTransform = identityTransform,
                         )
                     }
                 }
             }
             InProgressStrokes(
-                defaultBrush = brush,
-                nextBrush = { brush },
-                onStrokesFinished = { strokes -> dryStrokes.addAll(strokes) },
+                defaultBrush = liveBrush,
+                nextBrush = { liveBrush },
+                onStrokesFinished = { nativeStrokes ->
+                    if (canvasWidthPx <= 0) {
+                        session.captureError = "Canvas has no measured width"
+                    } else {
+                        val scale = InkPixelScale(canvasWidthPx.toDouble() / 612.0)
+                        // The probe captures and rebuilds each completed native stroke.
+                        // Failed conversions are explicit and never reported as finished.
+                        nativeStrokes.forEach { nativeStroke ->
+                            runCatching {
+                                val canonical = JetpackInkProbeAdapter.capture(nativeStroke, scale)
+                                JetpackInkProbeAdapter.rebuild(canonical, scale)
+                                canonical
+                            }.onSuccess {
+                                canonicalStrokes.add(it)
+                                session.captureError = null
+                            }.onFailure { session.captureError = it.message ?: "Unknown failure" }
+                        }
+                    }
+                },
             )
         }
     }
