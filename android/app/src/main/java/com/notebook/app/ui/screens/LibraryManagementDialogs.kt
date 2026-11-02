@@ -31,6 +31,7 @@ import com.notebook.app.data.library.model.Folder
 import com.notebook.app.data.library.model.Notebook
 import com.notebook.app.data.library.repository.FolderRepository
 import com.notebook.app.data.library.repository.NotebookRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /** A display-only selection. Repository operations remain the authority for all validation. */
@@ -156,6 +157,7 @@ internal suspend fun loadFolderDestinations(
 
     suspend fun visit(parentId: String?, depth: Int) {
         check(depth <= 100) { "Folder hierarchy is too deep to choose a destination" }
+
         for (folder in folderRepository.listByParent(parentId)) {
             check(visited.add(folder.id)) { "Folder hierarchy contains a cycle" }
             check(visited.size <= 3_000) { "Too many folders to choose a destination" }
@@ -183,14 +185,18 @@ private fun MoveLibraryItemDialog(
     var reload by remember(target.id) { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
 
+
     LaunchedEffect(target.id, target.isFolder, folderRepository, reload) {
         destinations = null
         error = null
+
         try {
             destinations = loadFolderDestinations(
                 folderRepository,
                 if (target.isFolder) target.id else null,
             )
+        } catch (exception: CancellationException) {
+            throw exception
         } catch (exception: Exception) {
             error = exception.message ?: "Could not load destinations"
         }

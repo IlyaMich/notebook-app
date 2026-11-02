@@ -335,4 +335,63 @@ class NoteAutosaveCoordinatorTest {
                 gate.complete(Unit)
             }
         }
+
+    @Test
+    fun externalRevisionChangeBlocksUnsafeRetry() = runBlocking {
+        val scope = CoroutineScope(
+            SupervisorJob() + Dispatchers.Default
+        )
+
+        try {
+            val repository = FakeRepository(noteId)
+            repository.failBeforeCommit = true
+
+            val coordinator = NoteAutosaveCoordinator(
+                noteId = noteId,
+                repository = repository,
+                scope = scope,
+                initialRevision = 7L,
+            )
+
+            coordinator.enqueue(edit)
+
+            val failed = awaitPhase(
+                coordinator,
+                SavePhase.FAILED,
+            )
+
+            assertEquals(7L, failed.committedRevision)
+            assertEquals(1, failed.pendingCommandCount)
+            assertEquals(1, repository.commitCalls)
+
+            // Simulate another writer committing a revision
+            // while this coordinator is waiting for retry.
+            repository.revision = 8L
+
+            val result = coordinator.retry()
+
+            // Retrying blindly could duplicate or overwrite work.
+            assertEquals(
+                SaveRetryResult.RECONCILIATION_REQUIRED,
+                result,
+            )
+
+            assertEquals(
+                SavePhase.FAILED,
+                coordinator.state.value.phase,
+            )
+
+            assertEquals(
+                1,
+                coordinator.state.value.pendingCommandCount,
+            )
+
+            // No additional commit attempt was made.
+            assertEquals(1, repository.commitCalls)
+            assertEquals(8L, repository.revision)
+        } finally {
+            scope.cancel()
+        }
+    }
+
 }

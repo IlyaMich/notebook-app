@@ -13,6 +13,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -48,6 +50,9 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.printToString
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val WHITE =
     """{"type":"blank","color":"#FFFFFF"}"""
@@ -61,15 +66,27 @@ private const val WARM =
 private class PausableDocumentRepository(
     private val delegate: DocumentRepository,
 ) : DocumentRepository {
+    private val pendingPreviewLoadFailure = AtomicBoolean(false)
     val entered = CompletableDeferred<Unit>()
     val attempts = AtomicInteger(0)
+    val failPreviewLoadAfterNextCommit = AtomicBoolean(false)
+
 
     @Volatile
     var gate: CompletableDeferred<Unit>? = null
 
+
     override suspend fun load(
         noteId: String,
-    ): StoredNoteContent = delegate.load(noteId)
+    ): StoredNoteContent {
+        if (pendingPreviewLoadFailure.compareAndSet(true, false)) {
+            throw IllegalStateException(
+                "STO06 injected preview reload failure"
+            )
+        }
+
+        return delegate.load(noteId)
+    }
 
     override suspend fun commit(
         noteId: String,
@@ -83,7 +100,13 @@ private class PausableDocumentRepository(
             currentGate.await()
         }
 
-        return delegate.commit(noteId, edit)
+        val committed = delegate.commit(noteId, edit)
+
+        if (failPreviewLoadAfterNextCommit.compareAndSet(true, false)) {
+            pendingPreviewLoadFailure.set(true)
+        }
+
+        return committed
     }
 }
 
@@ -189,15 +212,39 @@ class Nav3EditorAutosaveUiTest {
         }
     }
 
-    private fun awaitText(text: String) {
-        rule.waitUntil(10_000) {
-            rule.onAllNodesWithText(text)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
 
-        rule.onNodeWithText(text).assertIsDisplayed()
+    private fun awaitText(expected: String) {
+        try {
+            rule.waitUntil(10_000) {
+                rule.onAllNodesWithText(expected)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            rule.onNodeWithText(expected).assertIsDisplayed()
+        } catch (failure: Throwable) {
+            val actualUi = runCatching {
+                rule.onRoot(useUnmergedTree = true)
+                    .printToString()
+            }.getOrElse { error ->
+                "Could not capture Compose UI: $error"
+            }
+
+            throw AssertionError(
+                """
+            STO-06 UI verification failed.
+
+            Expected text:
+            $expected
+
+            Actual Compose semantics tree:
+            $actualUi
+            """.trimIndent(),
+                failure
+            )
+        }
     }
+
 
     private fun startBlockedEdit(): CompletableDeferred<Unit> {
         val gate = CompletableDeferred<Unit>()
@@ -344,4 +391,72 @@ class Nav3EditorAutosaveUiTest {
             fixture.documentRepository.attempts.get(),
         )
     }
+
+    @Test
+    fun successfulSaveRemainsVisibleWhenPreviewReloadFails() {
+        val editButton = "Test edit: change blank-page color"
+        val warning =
+            "Could not refresh saved preview: " +
+                "STO06 injected preview reload failure"
+
+        // The next successful commit will cause precisely
+        // one subsequent document load to fail.
+        fixture.documentRepository
+            .failPreviewLoadAfterNextCommit
+            .set(true)
+
+        // Execute a real Room-backed document edit.
+        rule.onNodeWithText(editButton).performClick()
+
+        // Persistence must succeed even though preview reload fails.
+        awaitText("Saved locally - revision 8")
+        awaitText(warning)
+
+        rule.onNodeWithText("Reload preview")
+            .assertIsDisplayed()
+
+        // Do not allow edits based on a stale preview.
+        rule.onNodeWithText(editButton)
+            .assertIsNotEnabled()
+
+        // Verify the database really contains the new revision.
+        val persisted = runBlocking {
+            RoomDocumentRepository(fixture.database)
+                .load(fixture.noteId)
+        }
+
+        assertEquals(8L, persisted.revision)
+        assertEquals(
+            WARM,
+            persisted.pages.single().backgroundJson
+        )
+
+        // Reload the preview without reopening the note.
+        rule.onNodeWithText("Reload preview")
+            .performClick()
+
+        // The one-shot injected failure has been consumed.
+        rule.waitUntil(10_000) {
+            rule.onAllNodesWithText("Reload preview")
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+
+        rule.onNodeWithText(warning)
+            .assertDoesNotExist()
+
+        rule.onNodeWithText("Saved locally - revision 8")
+            .assertIsDisplayed()
+
+        // The refreshed preview now matches the committed revision.
+        rule.onNodeWithText(editButton)
+            .assertIsEnabled()
+
+        // The manual preview reload must not create another commit.
+        assertEquals(
+            1,
+            fixture.documentRepository.attempts.get()
+        )
+    }
+
 }

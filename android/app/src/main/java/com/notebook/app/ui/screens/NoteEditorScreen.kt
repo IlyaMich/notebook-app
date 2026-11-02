@@ -23,6 +23,9 @@ import com.notebook.app.ui.editor.SavePhase
 import com.notebook.app.ui.editor.SaveRetryResult
 import kotlinx.coroutines.launch
 import com.notebook.app.ui.editor.NoteEditorSessionViewModel
+import android.util.Log
+import kotlinx.coroutines.CancellationException
+
 
 /**
  * STO-06 vertical slice.
@@ -47,6 +50,9 @@ fun NoteEditorScreen(
         mutableStateOf<StoredNoteContent?>(null)
     }
     var error by remember(noteId) { mutableStateOf<String?>(null) }
+    var previewWarning by remember(noteId) {
+        mutableStateOf<String?>(null)
+    }
 
     var coordinator by remember(noteId) {
         mutableStateOf<NoteAutosaveCoordinator?>(null)
@@ -62,30 +68,88 @@ fun NoteEditorScreen(
         mutableStateOf(false)
     }
 
+
     LaunchedEffect(noteId) {
+        // Essential initialization: these operations must succeed
+        // before the editor can work with this document.
         try {
             val loadedNote = noteRepository.findById(noteId)
                 ?: throw IllegalStateException("Note no longer exists")
 
             val loadedContent = documentRepository.load(noteId)
 
+            val activeCoordinator =
+                sessionViewModel.getOrCreateCoordinator(
+                    noteId = noteId,
+                    repository = documentRepository,
+                    initialRevision = loadedContent.revision,
+                )
+
             note = loadedNote
             content = loadedContent
-
-            coordinator = sessionViewModel.getOrCreateCoordinator(
-                noteId = noteId,
-                repository = documentRepository,
-                initialRevision = loadedContent.revision,
-            )
-
-            noteRepository.recordOpened(noteId)
+            coordinator = activeCoordinator
             error = null
+
+        } catch (exception: CancellationException) {
+            throw exception
+
         } catch (exception: Exception) {
             error = exception.message ?: "Failed to load note"
+            return@LaunchedEffect
+        }
+
+        // Nonessential metadata update.
+        //
+        // Failure here must not hide the editor, discard the
+        // retained coordinator, or prevent autosave retry.
+        try {
+            noteRepository.recordOpened(noteId)
+
+        } catch (exception: CancellationException) {
+            throw exception
+
+        } catch (exception: Exception) {
+            Log.w(
+                "NoteEditorScreen",
+                "Could not update recently-opened metadata",
+                exception,
+            )
         }
     }
 
+
     val saveState = coordinator?.state?.collectAsState()?.value
+
+    suspend fun reloadPreview() {
+        try {
+            val refreshed = documentRepository.load(noteId)
+            content = refreshed
+
+            val confirmedRevision =
+                coordinator?.state?.value?.committedRevision
+
+            previewWarning =
+                if (
+                    confirmedRevision != null &&
+                    refreshed.revision != confirmedRevision
+                ) {
+                    "Preview revision ${refreshed.revision} " +
+                        "does not match confirmed revision " +
+                        "$confirmedRevision."
+                } else {
+                    null
+                }
+
+        } catch (exception: CancellationException) {
+            throw exception
+
+        } catch (exception: Exception) {
+            previewWarning =
+                "Could not refresh saved preview: " +
+                    (exception.message ?: "Unknown error")
+        }
+    }
+
 
     // Refresh the preview after the confirmed committed revision changes.
     LaunchedEffect(
@@ -98,13 +162,7 @@ fun NoteEditorScreen(
             content != null &&
             content?.revision != saveState.committedRevision
         ) {
-            try {
-                content = documentRepository.load(noteId)
-                error = null
-            } catch (exception: Exception) {
-                error = exception.message
-                    ?: "Saved, but failed to reload document"
-            }
+            reloadPreview()
         }
 
         if (saveState?.phase == SavePhase.SAVED) {
@@ -271,6 +329,24 @@ fun NoteEditorScreen(
                             },
                         )
 
+                        if (previewWarning != null) {
+                            Text(
+                                previewWarning.orEmpty(),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        reloadPreview()
+                                    }
+                                },
+                            ) {
+                                Text("Reload preview")
+                            }
+                        }
+
+
                         if (saveState?.phase == SavePhase.FAILED) {
                             Text(
                                 saveState.failureMessage
@@ -333,11 +409,13 @@ fun NoteEditorScreen(
                             else -> null
                         }
 
+                        val previewIsCurrent =
+                            saveState?.phase == SavePhase.SAVED &&
+                                saveState.pendingCommandCount == 0 &&
+                                stored.revision == saveState.committedRevision
+
                         TextButton(
-                            enabled = (
-                                nextBackground != null &&
-                                    saveState?.phase == SavePhase.SAVED
-                                ),
+                            enabled = nextBackground != null && previewIsCurrent,
                             onClick = {
                                 val page = firstPage
                                     ?: return@TextButton
