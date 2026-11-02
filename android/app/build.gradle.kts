@@ -64,9 +64,10 @@ dependencies {
     implementation("androidx.room:room-runtime:2.8.5")
     implementation("androidx.room:room-ktx:2.8.5")
     ksp("androidx.room:room-compiler:2.8.5")
+    
     // EDT-05 CP1A — Debug-only Jetpack Ink evaluation.
     val inkProbeVersion = "1.0.0"
-
+    
     debugImplementation("androidx.ink:ink-authoring:$inkProbeVersion")
     debugImplementation("androidx.ink:ink-authoring-compose:$inkProbeVersion")
     debugImplementation("androidx.ink:ink-brush:$inkProbeVersion")
@@ -75,4 +76,7 @@ dependencies {
     debugImplementation("androidx.ink:ink-nativeloader:$inkProbeVersion")
     debugImplementation("androidx.ink:ink-rendering:$inkProbeVersion")
     debugImplementation("androidx.ink:ink-strokes:$inkProbeVersion")
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.navigation3)
 }

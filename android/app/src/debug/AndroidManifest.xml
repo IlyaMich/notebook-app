@@ -1,7 +1,15 @@
+
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
     <application>
-        <!-- All three activities are evaluation-only and absent from release builds. -->
+
+        <!-- Editor autosave test activity (existing on main). -->
+        <activity
+            android:name="com.notebook.app.ui.editor.Nav3EditorAutosaveTestActivity"
+            android:exported="true" />
+
+        <!-- EDT-05: Jetpack Ink evaluation activities (debug only). -->
         <activity
             android:name="com.notebook.app.ui.editor.ink.InkProbeActivity"
             android:exported="true"
@@ -11,6 +19,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
         <activity
             android:name="com.notebook.app.ui.editor.ink.InkPersistenceDemoActivity"
             android:exported="true"
@@ -20,6 +29,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
         <activity
             android:name="com.notebook.app.ui.editor.ink.InkGestureArbitrationActivity"
             android:exported="true"
@@ -29,5 +39,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
     </application>
+
 </manifest>
