@@ -1,45 +1,43 @@
-
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application>
 
-    <application>
+    <!-- Existing editor autosave test activity from main. -->
+    <activity
+      android:name="com.notebook.app.ui.editor.Nav3EditorAutosaveTestActivity"
+      android:exported="true" />
 
-        <!-- Editor autosave test activity (existing on main). -->
-        <activity
-            android:name="com.notebook.app.ui.editor.Nav3EditorAutosaveTestActivity"
-            android:exported="true" />
+    <!-- EDT-05 debug-only Jetpack Ink evaluation activities. -->
+    <activity
+      android:name="com.notebook.app.ui.editor.ink.InkProbeActivity"
+      android:exported="true"
+      android:label="Notebook Ink Probe">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
 
-        <!-- EDT-05: Jetpack Ink evaluation activities (debug only). -->
-        <activity
-            android:name="com.notebook.app.ui.editor.ink.InkProbeActivity"
-            android:exported="true"
-            android:label="Notebook Ink Probe">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+    <activity
+      android:name="com.notebook.app.ui.editor.ink.InkPersistenceDemoActivity"
+      android:exported="true"
+      android:label="Notebook Room Ink Demo">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
 
-        <activity
-            android:name="com.notebook.app.ui.editor.ink.InkPersistenceDemoActivity"
-            android:exported="true"
-            android:label="Notebook Room Ink Demo">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+    <activity
+      android:name="com.notebook.app.ui.editor.ink.InkGestureArbitrationActivity"
+      android:exported="true"
+      android:label="Notebook Ink Gestures">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
 
-        <activity
-            android:name="com.notebook.app.ui.editor.ink.InkGestureArbitrationActivity"
-            android:exported="true"
-            android:label="Notebook Ink Gestures">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-
-    </application>
+  </application>
 
 </manifest>
