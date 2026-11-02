@@ -16,8 +16,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -33,6 +35,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
+import java.util.Locale
 import androidx.compose.ui.graphics.drawscope.Stroke as ComposeStroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.draw.clipToBounds
@@ -81,31 +84,69 @@ internal class InkGestureDemoSession : ViewModel() {
     var navigationUpdates by mutableIntStateOf(0)
     var error by mutableStateOf<String?>(null)
         private set
-    // Changing the key disposes the native wet-ink view, including unfinished /
-    // canceled render state that cannot be cleared through the Compose API.
+    // This generation changes only on explicit Cancel or drawing-mode switch.
+    // A completed stroke and ordinary Clear do not need to destroy wet Ink.
     var inkLayerGeneration by mutableIntStateOf(0)
         private set
+    // A rejected FINISHED stroke requires no native view reset. Jetpack Ink
+    // removes finished native stroke IDs after onStrokesFinished returns.
+    // Remounting the native view here (even on a later frame) can disrupt
+    // subsequent pointer sequences. Only explicit Cancel or mode switch
+    // invalidates the native layer.
+    var lastHandoff by mutableStateOf<InkHandoffDiagnostics.Result?>(null)
+        private set
+    var cancellations by mutableIntStateOf(0)
+        private set
+    // Read-only geometry probe for instrumentation; not document or ink state.
+    var visiblePageRects by mutableStateOf<Map<String, InkClipGeometry.RectPx>>(emptyMap())
+        private set
+
+    fun updateVisiblePageRects(rects: Map<String, InkClipGeometry.RectPx>) {
+        visiblePageRects = rects
+    }
+
+    /** Simulates interruption: dispose wet ink without changing committed DU geometry. */
+    fun cancelWetInk() {
+        cancellations += 1
+        inkLayerGeneration += 1
+        error = null
+    }
 
     fun reject(reason: String) {
         rejected += 1
         error = reason
-        inkLayerGeneration += 1
+        lastHandoff = null
+        // Do not dispose/re-key InProgressStrokes for a completed rejection.
+        // It owns the finished stroke and cleans it up after our callback.
+        // We simply do not add a rejected stroke to the canonical list.
     }
 
     fun abandonNativeInk() {
         inkLayerGeneration += 1
     }
 
-    fun accept(stroke: InkViewportPageAdapter.Captured) {
+    fun accept(
+        stroke: InkViewportPageAdapter.Captured,
+        handoff: InkHandoffDiagnostics.Result? = null,
+    ) {
+        // Snapshot state changes synchronously inside Ink's onStrokesFinished callback.
+        // The wet view can now hand off to dry rendering in the same UI run loop.
         strokes.add(stroke)
+        lastHandoff = handoff
         error = null
     }
 
     fun clear() {
+        // Finished Ink strokes have already been removed from InProgressStrokes.
+        // Clear only the canonical dry-ink source, not the native wet view.
+        // Re-keying the view while HWUI has zoomed dry-ink draw commands in
+        // flight may destabilize rendering (EDT-05 CP3C RenderThread probe).
+        // Clear from a button outside the canvas while no pointer is down.
         strokes.clear()
         rejected = 0
         error = null
-        inkLayerGeneration += 1
+        lastHandoff = null
+        cancellations = 0
     }
 }
 
@@ -128,7 +169,6 @@ private fun InkGestureScreen(session: InkGestureDemoSession) {
     val latestViewport by rememberUpdatedState(viewport)
     // Refit on resize; canonical page-local ink remains in the retained ViewModel.
     LaunchedEffect(size) { camera = fit }
-
     val brush = remember {
         Brush.createWithComposeColor(
             family = StockBrushes.pressurePen(),
@@ -139,31 +179,21 @@ private fun InkGestureScreen(session: InkGestureDemoSession) {
     }
     val renderer = remember { CanvasStrokeRenderer.create() }
     val identity = remember { AndroidMatrix() }
-    // Ink's maskPath describes HIDDEN regions, not the allowed drawing area.
-    // Even-odd fill: mask the viewport rectangle minus the visible page rects.
-    // The parent clips the entire drawing surface below the header.
-    val inkMask = remember(camera, size, layout) {
+    // Shared geometry is authoritative for BOTH the wet mask and dry clip.
+    // The Ink mask is the hidden area: viewport minus visible page rectangles.
+    val clipRects = remember(camera, size, layout) {
+        InkClipGeometry.visiblePageRects(layout, camera, viewport)
+    }
+    SideEffect { session.updateVisiblePageRects(clipRects) }
+    val inkMask = remember(clipRects, size) {
         Path().apply {
             fillType = PathFillType.EvenOdd
             if (size.width > 0 && size.height > 0) {
                 addRect(Rect(0f, 0f, size.width.toFloat(), size.height.toFloat()))
             }
-            val view = camera
-            if (view != null && size.width > 0 && size.height > 0) {
-                layout.pages.forEach { page ->
-                    val topLeft = ViewportGeometry.worldToViewport(
-                        DuPoint(page.originXDu, page.originYDu), view,
-                    )
-                    val left = max(0f, topLeft.x.toFloat())
-                    val top = max(0f, topLeft.y.toFloat())
-                    val right = min(size.width.toFloat(),
-                        (topLeft.x + page.widthDu * view.scalePxPerDu).toFloat())
-                    val bottom = min(size.height.toFloat(),
-                        (topLeft.y + page.heightDu * view.scalePxPerDu).toFloat())
-                    if (right > left && bottom > top) {
-                        addRect(Rect(left, top, right, bottom))
-                    }
-                }
+            clipRects.values.forEach { bounds ->
+                addRect(Rect(bounds.left.toFloat(), bounds.top.toFloat(),
+                    bounds.right.toFloat(), bounds.bottom.toFloat()))
             }
         }
     }
@@ -222,6 +252,15 @@ private fun InkGestureScreen(session: InkGestureDemoSession) {
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.testTag("inkGestureStatus"),
             )
+            val handoff = session.lastHandoff
+            val handoffText = if (handoff == null) {
+                "Handoff geometry: not measured"
+            } else {
+                val outcome = if (handoff.withinBudget) "PASS" else "CHECK"
+                "Handoff geometry: ${String.format(Locale.US, "%.3f", handoff.maxPositionErrorPx)} px max ($outcome)"
+            }
+            Text(handoffText, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.testTag("inkGestureHandoff"))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
                     fingerDrawing = !fingerDrawing
@@ -231,6 +270,9 @@ private fun InkGestureScreen(session: InkGestureDemoSession) {
                     Text(if (fingerDrawing) "Use finger navigation" else "Enable finger drawing")
                 }
                 Button(onClick = { session.clear(); strokeStartCamera = null }) { Text("Clear") }
+            }
+            TextButton(onClick = { session.cancelWetInk(); strokeStartCamera = null }) {
+                Text("Cancel wet ink (${session.cancellations})")
             }
             Text("Touch: pan/pinch in Navigate mode. Stylus: ink. Mouse: ink.",
                 style = MaterialTheme.typography.bodySmall)
@@ -327,6 +369,7 @@ private fun InkGestureScreen(session: InkGestureDemoSession) {
             Canvas(Modifier.fillMaxSize().clipToBounds()) {
                 val view = camera ?: return@Canvas
                 for (page in layout.pages) {
+                    val visibleClip = clipRects[page.id] ?: continue
                     val topLeft = ViewportGeometry.worldToViewport(
                         DuPoint(page.originXDu, page.originYDu), view,
                     )
@@ -337,17 +380,18 @@ private fun InkGestureScreen(session: InkGestureDemoSession) {
                     drawRect(Color.Gray, Offset(topLeft.x.toFloat(), topLeft.y.toFloat()),
                         Size(w.toFloat(), h.toFloat()), style = ComposeStroke(width = 2f))
                     drawContext.canvas.nativeCanvas.withSave {
-                        clipRect(topLeft.x.toFloat(), topLeft.y.toFloat(),
-                            (topLeft.x + w).toFloat(), (topLeft.y + h).toFloat())
+                        // Exactly the same intersection used to unmask live ink.
+                        clipRect(visibleClip.left.toFloat(), visibleClip.top.toFloat(),
+                            visibleClip.right.toFloat(), visibleClip.bottom.toFloat())
                         dryInk.filter { it.first == page.id }.forEach { (_, native) ->
                             renderer.draw(canvas = this, stroke = native, strokeToScreenTransform = identity)
                         }
                     }
                 }
             }
-            // The 1.0.0 Compose Ink API has no explicit clear() method. Re-key
-            // its native view when a stroke is rejected or the user presses Clear.
-            // A generation check ignores any callback arriving from the old view.
+            // Only Cancel and mode changes remount the native layer. Neither
+            // completed rejection nor Clear remounts: Ink has already retired
+            // finished wet strokes. Generation checks discard stale callbacks.
             key(session.inkLayerGeneration) {
             val generation = session.inkLayerGeneration
             InProgressStrokes(
@@ -375,16 +419,24 @@ private fun InkGestureScreen(session: InkGestureDemoSession) {
                                         if (input.hasOrientation) input.orientationRadians.toDouble() else null,
                                     )
                                 }
-                                InkViewportPageAdapter.captureOrNull(
+                                val converted = InkViewportPageAdapter.captureOrNull(
                                     samples, layout, transform, viewport,
                                     brushKind = "pen", brushWidthPx = 6.0,
                                     brushColorHex = "#2255AA", brushOpacity = 1.0,
                                 )
-                            }.onSuccess { converted ->
+                                val handoff = converted?.let { captured ->
+                                    InkViewportPageAdapter.projectOrNull(
+                                        captured.pageId, captured.canonical, layout, transform,
+                                    )?.let { projected ->
+                                        InkHandoffDiagnostics.compareOrNull(samples, projected, 6.0)
+                                    }
+                                }
+                                Pair(converted, handoff)
+                            }.onSuccess { (converted, handoff) ->
                                 if (converted == null) {
                                     session.reject("Outside page or crosses page boundary")
                                 } else {
-                                    session.accept(converted)
+                                    session.accept(converted, handoff)
                                 }
                             }.onFailure {
                                 session.reject(it.message ?: "Native input could not be converted")

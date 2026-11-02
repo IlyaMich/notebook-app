@@ -35,7 +35,7 @@ class InkGestureCleanupRegressionTest {
         rule.onNodeWithText("Mode: Finger draw").assertExists()
     }
 
-    @Test fun clearResetsCanonicalStateAndInvalidatesNativeViewGeneration() {
+    @Test fun clearResetsCanonicalStateWithoutRemountingNativeView() {
         val value = InkViewportPageAdapter.Captured(
             pageId = "a4-portrait",
             canonical = CanonicalInkStroke(
@@ -56,7 +56,7 @@ class InkGestureCleanupRegressionTest {
         rule.onNodeWithText("Ink conversion: Ready").assertExists()
         rule.runOnUiThread {
             assertTrue(session().strokes.isEmpty())
-            assertEquals(oldGeneration + 1, session().inkLayerGeneration)
+            assertEquals(oldGeneration, session().inkLayerGeneration)
         }
     }
 

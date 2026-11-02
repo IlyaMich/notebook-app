@@ -1,6 +1,8 @@
 # EDT-05 CP3B — Gesture demo boundary and reset repair
 
-Status: debug-only verification checkpoint; **do not merge or commit until Android emulator acceptance passes**.
+Status: **CP3B historical implementation record; checkpoint verified and committed.**
+
+> **Superseded native lifecycle behavior (CP3C):** The description below records the original CP3B repair. CP3C subsequently changed completed-stroke rejection and ordinary Clear to **retain** `InProgressStrokes` without changing `inkLayerGeneration`. Only explicit Cancel and drawing-mode switching remount the native layer. The authoritative current behavior and crash risk are documented in `edt_05_cp3c_wet_dry_boundary_fidelity.md` and `edt_05_cp3c_renderthread_clear_isolation.md`.
 
 ## Why the existing CP3B demonstration failed
 
