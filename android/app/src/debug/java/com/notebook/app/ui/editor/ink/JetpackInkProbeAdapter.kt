@@ -76,7 +76,7 @@ internal object JetpackInkProbeAdapter {
             size = sizePx,
             epsilon = 0.1f,
         )
-        return Stroke(nativeBrush, inputs.toImmutable())
+        return Stroke(nativeBrush, inputs)
     }
 
     /** Canonical angles are finite radians; Ink accepts only [0, 2*pi). */
