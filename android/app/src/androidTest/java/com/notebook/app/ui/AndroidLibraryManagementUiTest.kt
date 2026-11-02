@@ -23,6 +23,9 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.printToString
+import androidx.compose.ui.test.isRoot
 
 /** UI operations use the production LIB-03 repositories and a separate disposable Room database. */
 @RunWith(AndroidJUnit4::class)
@@ -61,9 +64,39 @@ class AndroidLibraryManagementUiTest {
         }
     }
 
+
+
     private fun awaitTag(tag: String) {
-        compose.waitUntil(10_000L) {
-            compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
+        try {
+            compose.waitUntil(10_000L) {
+                compose.onAllNodesWithTag(tag)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+        } catch (
+            failure: androidx.compose.ui.test.ComposeTimeoutException
+        ) {
+            val diagnostics = runCatching {
+                val roots = compose.onAllNodes(
+                    isRoot(),
+                    useUnmergedTree = true,
+                )
+
+                val rootCount = roots.fetchSemanticsNodes().size
+                val tree = roots.printToString(maxDepth = 20)
+
+                "Compose root count: $rootCount\n" +
+                    "Compose semantics tree:\n$tree"
+            }.getOrElse { diagnosticError ->
+                "Could not capture Compose semantics: " +
+                    diagnosticError.toString()
+            }
+
+            throw AssertionError(
+                "Expected test tag not found: $tag\n" +
+                    diagnostics,
+                failure,
+            )
         }
     }
 
