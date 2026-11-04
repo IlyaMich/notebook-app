@@ -473,6 +473,26 @@ fun ContinuousPageViewport(
                                 PointerEventPass.Main,
                             )
 
+                            // A platform-cancelled gesture can arrive as a consumed
+                            // pointer-up event. Never treat that as a completed stroke.
+                            //
+                            // Check consumption BEFORE our own dispatcher consumes
+                            // any pointer changes.
+                            val cancelledRelease = event.changes.any { change ->
+                                change.changedToUpIgnoreConsumed() && change.isConsumed
+                            }
+
+                            if (cancelledRelease) {
+                                processEffects(owner.cancelAll())
+
+                                tapPointerId = null
+                                tapEligible = false
+                                transformStarted = false
+                                panMotion = 0.0
+                                zoomMotion = 0.0
+
+                                continue
+                            }
                             val fingerCount = event.changes.count {
                                 it.pressed && it.type == PointerType.Touch
                             }
