@@ -18,8 +18,11 @@ import kotlinx.serialization.json.add
  */
 internal object EditorPenDocumentCodec {
 
-    const val PEN_WIDTH_DU = 3.0
-    const val PEN_COLOR_HEX = "#2255AA"
+    const val PEN_WIDTH_DU =
+        EditorInkBrushPresets.PEN_WIDTH_DU
+
+    const val PEN_COLOR_HEX =
+        EditorInkBrushPresets.PEN_COLOR_HEX
 
     private const val MAX_EXACT_TIME_MS =
         9_007_199_254_740_991L
@@ -28,8 +31,10 @@ internal object EditorPenDocumentCodec {
         completed: EditorPenPreview,
         layout: ContinuousPageLayout,
         elementId: String = UUID.randomUUID().toString(),
+        tool: EditorInkTool = EditorInkTool.PEN,
     ): String {
         UUID.fromString(elementId)
+        val brush = EditorInkBrushPresets.forTool(tool)
 
         require(completed.samples.isNotEmpty()) {
             "Cannot save an empty stroke"
@@ -121,10 +126,10 @@ internal object EditorPenDocumentCodec {
                     put(
                         "brush",
                         buildJsonObject {
-                            put("kind", "pen")
-                            put("width", PEN_WIDTH_DU)
-                            put("color", PEN_COLOR_HEX)
-                            put("opacity", 1.0)
+                            put("kind", brush.kind)
+                            put("width", brush.widthDu)
+                            put("color", brush.colorHex)
+                            put("opacity", brush.opacity)
                         },
                     )
 

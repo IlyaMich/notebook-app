@@ -189,4 +189,117 @@ class EditorPenDocumentCodecTest {
 
         assertEquals(samplesBefore, original.samples)
     }
+
+    @Test
+    fun allToolsSerializeTheirCanonicalBrushProperties() {
+        data class Expected(
+            val kind: String,
+            val widthDu: Double,
+            val colorHex: String,
+            val opacity: Double,
+        )
+
+        val expectations = mapOf(
+            EditorInkTool.PEN to Expected(
+                "pen", 3.0, "#2255AA", 1.0,
+            ),
+            EditorInkTool.PENCIL to Expected(
+                "pencil", 2.0, "#444444", 0.85,
+            ),
+            EditorInkTool.HIGHLIGHTER to Expected(
+                "highlighter", 14.0, "#FFE45C", 0.35,
+            ),
+        )
+
+        assertEquals(
+            EditorInkTool.entries.toSet(),
+            expectations.keys,
+        )
+
+        expectations.forEach { (tool, expected) ->
+            val envelope = EditorPenDocumentCodec.encode(
+                completed = captured(),
+                layout = layout,
+                elementId = elementId,
+                tool = tool,
+            )
+
+            // Verify using the actual EDT-07 production decoder.
+            val decoded = decode(envelope)
+
+            assertEquals(expected.kind, decoded.brush.kind)
+            assertEquals(
+                expected.widthDu,
+                decoded.brush.widthDu,
+                0.000001,
+            )
+            assertEquals(
+                expected.colorHex,
+                decoded.brush.colorHex,
+            )
+            assertEquals(
+                expected.opacity,
+                decoded.brush.opacity,
+                0.000001,
+            )
+        }
+    }
+
+    @Test
+    fun defaultPenEncodingMatchesExplicitPenEncoding() {
+        val original = captured()
+
+        val defaultEnvelope = EditorPenDocumentCodec.encode(
+            completed = original,
+            layout = layout,
+            elementId = elementId,
+        )
+
+        val explicitEnvelope = EditorPenDocumentCodec.encode(
+            completed = original,
+            layout = layout,
+            elementId = elementId,
+            tool = EditorInkTool.PEN,
+        )
+
+        assertEquals(
+            defaultEnvelope,
+            explicitEnvelope,
+        )
+    }
+
+    @Test
+    fun toolSelectionDoesNotChangeCanonicalStrokeGeometry() {
+        val original = captured()
+
+        val strokes = EditorInkTool.entries.map { tool ->
+            val envelope = EditorPenDocumentCodec.encode(
+                completed = original,
+                layout = layout,
+                elementId = elementId,
+                tool = tool,
+            )
+
+            decode(envelope)
+        }
+
+        val referenceSamples = strokes.first().samples
+
+        strokes.forEach { stroke ->
+            assertEquals(
+                referenceSamples,
+                stroke.samples,
+            )
+
+            assertEquals(
+                pageId,
+                stroke.pageId,
+            )
+
+            assertEquals(
+                elementId,
+                stroke.elementId,
+            )
+        }
+    }
 }
