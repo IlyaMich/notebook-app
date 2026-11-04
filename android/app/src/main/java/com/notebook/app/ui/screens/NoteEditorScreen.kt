@@ -72,6 +72,9 @@ fun NoteEditorScreen(
     var fingerWritingPreview by rememberSaveable(noteId) {
         mutableStateOf(false)
     }
+    var penInputError by remember(noteId) {
+        mutableStateOf<String?>(null)
+    }
 
     LaunchedEffect(noteId) {
         // Essential initialization: these operations must succeed
@@ -298,9 +301,9 @@ fun NoteEditorScreen(
             ) {
                 Text(
                     if (fingerWritingPreview) {
-                        "Finger Pen preview: ON (not saved)"
+                        "Finger Pen mode: ON (autosaved)"
                     } else {
-                        "Enable finger Pen preview"
+                        "Enable finger Pen writing"
                     }
                 )
             }
@@ -348,6 +351,14 @@ fun NoteEditorScreen(
                                 MaterialTheme.colorScheme.onSurface
                             },
                         )
+
+                        if (penInputError != null) {
+                            Text(
+                                text = penInputError.orEmpty(),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
 
                         if (previewWarning != null) {
                             Text(
@@ -494,15 +505,40 @@ fun NoteEditorScreen(
                     // Zoom, pan and page selection remain
                     // transient. No drawing-input or document
                     // mutation is introduced here.
+
                     ContinuousPageViewport(
                         pages = viewportSnapshot.pages,
                         storedPages = viewportSnapshot.storedPages,
                         documentKey = noteId,
                         fingerWritingPreview = fingerWritingPreview,
+                        onPenStrokeCompleted = { pageId, envelopeJson ->
+                            val activeCoordinator = coordinator
+
+                            if (activeCoordinator == null) {
+                                penInputError =
+                                    "Cannot save Pen stroke: editor session unavailable"
+                            } else {
+                                // One completed stroke = one document edit.
+                                // Room writes, revision updates, failure tracking
+                                // and retries remain owned by the coordinator.
+                                activeCoordinator.enqueue(
+                                    DocumentEdit.InsertElements(
+                                        pageId = pageId,
+                                        envelopes = listOf(envelopeJson),
+                                    )
+                                )
+
+                                penInputError = null
+                            }
+                        },
+                        onPenStrokeError = { message ->
+                            penInputError = message
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f),
                     )
+
                 }
             }
         }

@@ -57,6 +57,8 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import com.notebook.app.ui.editor.ink.EditorPenCapture
 import com.notebook.app.ui.editor.ink.EditorPenPoint
 import com.notebook.app.ui.editor.ink.EditorPenPreview
+import androidx.compose.runtime.rememberUpdatedState
+import com.notebook.app.ui.editor.ink.EditorPenDocumentCodec
 
 /** Read-only snapshot for this checkpoint. Use page IDs/dimensions from DocumentRepository.load. */
 data class PageViewportItem(
@@ -108,7 +110,15 @@ fun ContinuousPageViewport(
     documentKey: String = pages.firstOrNull()?.id.orEmpty(),
     storedPages: Map<String, StoredPage> = emptyMap(),
     fingerWritingPreview: Boolean = false,
+    onPenStrokeCompleted: (String, String) -> Unit = { _, _ -> },
+    onPenStrokeError: (String) -> Unit = {},
 ) {
+    val latestOnPenStrokeCompleted by
+    rememberUpdatedState(onPenStrokeCompleted)
+
+    val latestOnPenStrokeError by
+    rememberUpdatedState(onPenStrokeError)
+
     val layout = remember(pages) {
         ViewportGeometry.layoutOrNull(pages.map { PageSizeDu(it.id, it.widthDu, it.heightDu) })
     }
@@ -354,19 +364,53 @@ fun ContinuousPageViewport(
                                 }
                             }
 
+
                             is EditorGestureOwnership.Effect.Finished -> {
                                 if (
                                     drawingPointerId ==
                                     effect.stroke.pointerId
                                 ) {
-                                    capture.finish(effect.stroke.pointerId)
-                                    drawingPointerId = null
+                                    val completed = capture.finish(
+                                        effect.stroke.pointerId
+                                    )
 
-                                    // 2C-1: Discard the completed preview.
-                                    // No document command is created.
+                                    drawingPointerId = null
                                     livePenPreview = null
+
+                                    if (completed == null) {
+                                        latestOnPenStrokeError(
+                                            "Completed Pen stroke has no capture data"
+                                        )
+                                    } else {
+                                        // Conversion can fail if the completed
+                                        // samples violate canonical geometry.
+                                        // Never enqueue a partially converted stroke.
+                                        val encoded = runCatching {
+                                            EditorPenDocumentCodec.encode(
+                                                completed = completed,
+                                                layout = layout,
+                                            )
+                                        }
+
+                                        encoded.fold(
+                                            onSuccess = { envelopeJson ->
+                                                latestOnPenStrokeCompleted(
+                                                    completed.pageId,
+                                                    envelopeJson,
+                                                )
+                                            },
+                                            onFailure = { exception ->
+                                                latestOnPenStrokeError(
+                                                    "Pen stroke rejected: " +
+                                                        (exception.message
+                                                            ?: "Invalid stroke geometry")
+                                                )
+                                            },
+                                        )
+                                    }
                                 }
                             }
+
 
                             is EditorGestureOwnership.Effect.Cancelled -> {
                                 capture.cancel()
@@ -725,7 +769,10 @@ fun ContinuousPageViewport(
                     ) {
                         val samples = preview.samples
                         val penColor = Color(0xFF2255AA)
-                        val penWidth = 4.dp.toPx()
+                        val penWidth = (
+                            EditorPenDocumentCodec.PEN_WIDTH_DU *
+                                preview.startTransform.scalePxPerDu
+                            ).toFloat()
 
                         if (samples.size == 1) {
                             val point = samples.first()
