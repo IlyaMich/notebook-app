@@ -36,6 +36,14 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.notebook.app.data.content.model.StoredPage
+import com.notebook.app.ui.editor.ink.CanonicalStrokeCanvasRenderer
+import com.notebook.app.ui.editor.ink.CanonicalStrokeRenderPlan
+import com.notebook.app.ui.editor.ink.StoredCanonicalStroke
+import com.notebook.app.ui.editor.ink.StoredCanonicalStrokeDecoder
+import java.util.LinkedHashMap
+import org.json.JSONObject
+import android.util.Log
 
 /** Read-only snapshot for this checkpoint. Use page IDs/dimensions from DocumentRepository.load. */
 data class PageViewportItem(
@@ -44,6 +52,25 @@ data class PageViewportItem(
     val heightDu: Double,
     val elementCount: Int,
 )
+
+/**
+ * Only blank-page colors are supported by this checkpoint.
+ * Unsupported background rendering remains explicitly deferred.
+ */
+private fun blankPaperColorOrWhite(backgroundJson: String): Color =
+    runCatching {
+        val background = JSONObject(backgroundJson)
+
+        if (background.optString("type") == "blank") {
+            Color(
+                android.graphics.Color.parseColor(
+                    background.getString("color")
+                )
+            )
+        } else {
+            Color.White
+        }
+    }.getOrDefault(Color.White)
 
 /**
  * EDT-03 checkpoint 4: a read-only Canvas of persisted, mixed-size pages.
@@ -57,11 +84,21 @@ fun ContinuousPageViewport(
     pages: List<PageViewportItem>,
     modifier: Modifier = Modifier,
     documentKey: String = pages.firstOrNull()?.id.orEmpty(),
+    storedPages: Map<String, StoredPage> = emptyMap(),
 ) {
     val layout = remember(pages) {
         ViewportGeometry.layoutOrNull(pages.map { PageSizeDu(it.id, it.widthDu, it.heightDu) })
     }
     val surround = MaterialTheme.colorScheme.surfaceVariant
+
+    // EDT-07: Preserve the existing STO-06 blank-page
+    // color behavior using the confirmed stored snapshot.
+    // Patterned and PDF backgrounds require later renderers.
+    val pageColors = remember(storedPages) {
+        storedPages.mapValues { (_, page) ->
+            blankPaperColorOrWhite(page.backgroundJson)
+        }
+    }
     if (layout == null || layout.pages.isEmpty()) {
         Box(modifier.fillMaxSize().background(surround), contentAlignment = Alignment.Center) {
             Text(if (layout == null) "Cannot display invalid page dimensions" else "This note has no pages")
@@ -139,6 +176,86 @@ fun ContinuousPageViewport(
         it.layout == layout && it.viewport == viewportPx && it.gutterPx == gutterPx
     }
     val transform = activeSession?.transform
+
+    // Cache canonical decoding separately from zoom/pan.
+    // Keep only recently visible pages in memory.
+    val decodedCache = remember(documentKey, storedPages) {
+        object : LinkedHashMap<String, List<StoredCanonicalStroke>>(
+            8, 0.75f, true
+        ) {
+            override fun removeEldestEntry(
+                eldest: MutableMap.MutableEntry<
+                    String, List<StoredCanonicalStroke>
+                    >?
+            ): Boolean = size > 6
+        }
+    }
+
+    // Render plans depend on viewport geometry, but their
+    // canonical sources do not. Only plan visible pages.
+    val strokePlans = remember(
+        layout, transform, viewportPx, storedPages
+    ) {
+        if (transform == null) {
+            emptyMap()
+        } else {
+            buildMap {
+                layout.pages.forEach { positioned ->
+                    val source = storedPages[positioned.id]
+                        ?: return@forEach
+
+                    val origin = ViewportGeometry.pageToViewport(
+                        DuPoint(0.0, 0.0),
+                        positioned,
+                        transform,
+                    )
+
+                    val widthPx =
+                        positioned.widthDu * transform.scalePxPerDu
+                    val heightPx =
+                        positioned.heightDu * transform.scalePxPerDu
+
+                    val visible =
+                        origin.x.isFinite() &&
+                            origin.y.isFinite() &&
+                            widthPx.isFinite() &&
+                            heightPx.isFinite() &&
+                            origin.x < viewportPx.width &&
+                            origin.y < viewportPx.height &&
+                            origin.x + widthPx > 0.0 &&
+                            origin.y + heightPx > 0.0
+
+                    if (!visible) return@forEach
+
+                    val plan = try {
+                        val decoded = decodedCache.getOrPut(
+                            positioned.id
+                        ) {
+                            StoredCanonicalStrokeDecoder.fromPage(source)
+                        }
+
+                        CanonicalStrokeRenderPlan.build(
+                            page = source,
+                            positionedPage = positioned,
+                            viewport = transform,
+                            decodedStrokes = decoded,
+                        )
+                    } catch (exception: RuntimeException) {
+                        Log.w(
+                            "ContinuousPageViewport",
+                            "Unable to prepare ink preview for page ${positioned.id}",
+                            exception,
+                        )
+                        null
+                    }
+
+                    if (plan != null) {
+                        put(positioned.id, plan)
+                    }
+                }
+            }
+        }
+    }
     val zoomPercent = transform?.let { current ->
         fitted?.let { initial ->
             ((current.scalePxPerDu / initial.scalePxPerDu) * 100.0).toInt()
@@ -205,9 +322,33 @@ fun ContinuousPageViewport(
                 left + width <= 0f || top + height <= 0f
             ) return@forEachIndexed
 
-            drawRect(Color.White, topLeft = Offset(left, top), size = Size(width, height))
+            drawRect(
+                color = pageColors[page.id] ?: Color.White,
+                topLeft = Offset(left, top),
+                size = Size(width, height),
+            )
             drawRect(pageOutline, topLeft = Offset(left, top), size = Size(width, height),
                 style = Stroke(width = 1.dp.toPx()))
+
+            // EDT-07: Draw canonical ink from the persisted
+            // page snapshot, independently of capture state.
+            strokePlans[page.id]?.let { plan ->
+                drawIntoCanvas { canvas ->
+                    try {
+                        CanonicalStrokeCanvasRenderer.draw(
+                            canvas.nativeCanvas,
+                            plan,
+                        )
+                    } catch (exception: RuntimeException) {
+                        Log.w(
+                            "ContinuousPageViewport",
+                            "Unable to draw ink preview for page ${page.id}",
+                            exception,
+                        )
+                    }
+                }
+            }
+
             // The same page rectangle clips placeholder text now and will clip editable
             // elements and live stroke previews once those renderers exist.
             clipRect(left = left, top = top, right = left + width, bottom = top + height) {

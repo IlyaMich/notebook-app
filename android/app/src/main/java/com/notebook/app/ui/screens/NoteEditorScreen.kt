@@ -25,7 +25,8 @@ import kotlinx.coroutines.launch
 import com.notebook.app.ui.editor.NoteEditorSessionViewModel
 import android.util.Log
 import kotlinx.coroutines.CancellationException
-
+import com.notebook.app.ui.editor.viewport.ContinuousPageViewport
+import com.notebook.app.ui.editor.viewport.toViewportSnapshot
 
 /**
  * STO-06 vertical slice.
@@ -305,7 +306,9 @@ fun NoteEditorScreen(
                 else -> {
                     val stored = content!!
                     val firstPage = stored.pages.firstOrNull()
-
+                    val viewportSnapshot = remember(stored) {
+                        stored.toViewportSnapshot()
+                    }
                     val statusText = when (saveState?.phase) {
                         SavePhase.PENDING -> "Pending save"
                         SavePhase.SAVING -> "Saving..."
@@ -438,77 +441,50 @@ fun NoteEditorScreen(
                                 "Use a disposable note.",
                             style = MaterialTheme.typography.labelSmall,
                         )
-                    }
 
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                MaterialTheme.colorScheme.surfaceVariant
-                            ),
-                        contentAlignment = Alignment.TopCenter,
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .verticalScroll(rememberScrollState()),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .padding(20.dp)
-                                    .widthIn(max = 580.dp)
-                                    .fillMaxWidth()
-                                    .background(
-                                        if (firstPage?.backgroundJson ==
-                                            """{"type":"blank","color":"#FFF9E9"}"""
-                                        ) {
-                                            Color(0xFFFFF9E9)
-                                        } else {
-                                            Color.White
-                                        }
-                                    ),
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(24.dp),
-                                    verticalArrangement =
-                                        Arrangement.spacedBy(12.dp),
-                                ) {
-                                    Text(
-                                        "Persisted document",
-                                        color = Color.DarkGray,
-                                    )
+                        // Retain STO-06 diagnostic information
+                        // while the editor rendering integration
+                        // is being verified.
+                        Text(
+                            "Persisted document",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
 
-                                    if (firstPage != null) {
-                                        Text(
-                                            "Page ID: ${firstPage.id}",
-                                            color = Color.DarkGray,
-                                        )
-                                        Text(
-                                            "Size: ${firstPage.width} x " +
-                                                "${firstPage.height}",
-                                            color = Color.DarkGray,
-                                        )
-                                        Text(
-                                            "Editable elements stored: " +
-                                                "${firstPage.elements.size}",
-                                            color = Color.DarkGray,
-                                        )
-                                        Text(
-                                            "Background: " +
-                                                firstPage.backgroundJson,
-                                            color = Color.DarkGray,
-                                        )
-                                    }
-
-                                    Text(
-                                        "Full page rendering arrives in M2.",
-                                        color = Color.DarkGray,
-                                    )
-                                }
-                            }
+                        firstPage?.let { page ->
+                            Text(
+                                "Page ID: ${page.id}",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                            Text(
+                                "Size: ${page.width} x ${page.height}",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                            Text(
+                                "Editable elements stored: ${page.elements.size}",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                            Text(
+                                "Background: ${page.backgroundJson}",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
                         }
+
                     }
+
+                    // EDT-07: Render the same confirmed Room
+                    // snapshot used by the existing editor.
+                    //
+                    // Zoom, pan and page selection remain
+                    // transient. No drawing-input or document
+                    // mutation is introduced here.
+                    ContinuousPageViewport(
+                        pages = viewportSnapshot.pages,
+                        storedPages = viewportSnapshot.storedPages,
+                        documentKey = noteId,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                    )
                 }
             }
         }
