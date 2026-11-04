@@ -63,7 +63,21 @@ internal class EditorGestureOwnership {
                     )
 
         if (cancelFingerStroke) {
-            activeStroke?.let { effects += Effect.Cancelled(it) }
+            val previousStroke = activeStroke
+
+            if (previousStroke != null) {
+                effects += Effect.Cancelled(previousStroke)
+
+                // Two-finger navigation takes over both contacts,
+                // not just the newly pressed finger.
+                if (
+                    contact == EditorContact.FINGER &&
+                    fingerCount > 1
+                ) {
+                    navigationPointers += previousStroke.pointerId
+                }
+            }
+
             activeStroke = null
         }
 

@@ -3,8 +3,6 @@ package com.notebook.app.ui.editor.viewport
 import android.graphics.Paint
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +42,16 @@ import com.notebook.app.ui.editor.ink.StoredCanonicalStrokeDecoder
 import java.util.LinkedHashMap
 import org.json.JSONObject
 import android.util.Log
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import com.notebook.app.ui.editor.ink.EditorContact
+import com.notebook.app.ui.editor.ink.EditorFingerMode
+import com.notebook.app.ui.editor.ink.EditorGestureOwnership
+import com.notebook.app.ui.editor.ink.EditorInkTool
+import kotlin.math.abs
+import kotlin.math.hypot
 
 /** Read-only snapshot for this checkpoint. Use page IDs/dimensions from DocumentRepository.load. */
 data class PageViewportItem(
@@ -71,6 +79,15 @@ private fun blankPaperColorOrWhite(backgroundJson: String): Color =
             Color.White
         }
     }.getOrDefault(Color.White)
+
+private fun PointerType.toEditorContact(): EditorContact =
+    when (this) {
+        PointerType.Stylus -> EditorContact.STYLUS
+        PointerType.Touch -> EditorContact.FINGER
+        PointerType.Eraser -> EditorContact.ERASER
+        PointerType.Mouse -> EditorContact.MOUSE
+        else -> EditorContact.UNKNOWN
+    }
 
 /**
  * EDT-03 checkpoint 4: a read-only Canvas of persisted, mixed-size pages.
@@ -275,38 +292,271 @@ fun ContinuousPageViewport(
                 stateDescription = "Zoom $zoomPercent percent; $selectionLabel"
             }
             .onSizeChanged { canvasSize = it }
-            .pointerInput(layout, canvasSize, gutterPx) {
-                detectTapGestures { tapped ->
-                    val current = session?.takeIf {
-                        it.layout == layout && it.viewport == viewportPx && it.gutterPx == gutterPx
-                    } ?: return@detectTapGestures
-                    // A tap in the gutter, gap, or narrower-page margin has no page target.
-                    selectedPageId = ViewportInteraction.hitTestVisiblePage(
-                        PxPoint(tapped.x.toDouble(), tapped.y.toDouble()),
-                        layout, current.transform, viewportPx,
-                    )?.pageId
-                }
-            }
-            .pointerInput(layout, canvasSize, gutterPx) {
-                detectTransformGestures(panZoomLock = true) { centroid, pan, zoom, _ ->
-                    val previous = session?.takeIf {
-                        it.layout == layout && it.viewport == viewportPx && it.gutterPx == gutterPx
-                    } ?: return@detectTransformGestures
-                    val fitScale = fitted?.scalePxPerDu ?: return@detectTransformGestures
-                    val next = ViewportNavigation.updateOrNull(
-                        layout = layout,
-                        viewport = viewportPx,
-                        gutterPx = gutterPx,
-                        fitScalePxPerDu = fitScale,
-                        current = previous.transform,
-                        centroidPreviousPx = PxPoint(centroid.x.toDouble(), centroid.y.toDouble()),
-                        panPx = PxPoint(pan.x.toDouble(), pan.y.toDouble()),
-                        zoomChange = zoom.toDouble(),
-                    )
-                    if (next != null) {
-                        session = previous.copy(transform = next)
-                        saveViewportAnchor(next)
+            .pointerInput(documentKey, layout, canvasSize, gutterPx) {
+                val owner = EditorGestureOwnership()
+
+                // EDT-09 2B-2: temporary routing configuration.
+                // Tool selection and finger mode will come from the
+                // production editor in the following checkpoints.
+                val selectedTool = EditorInkTool.PEN
+                val fingerMode = EditorFingerMode.NAVIGATE
+
+                var drawingPointerId: Long? = null
+
+                fun processEffects(
+                    effects: List<EditorGestureOwnership.Effect>,
+                ) {
+                    effects.forEach { effect ->
+                        when (effect) {
+                            is EditorGestureOwnership.Effect.Started -> {
+                                drawingPointerId = effect.stroke.pointerId
+                            }
+                            is EditorGestureOwnership.Effect.Finished -> {
+                                if (drawingPointerId == effect.stroke.pointerId) {
+                                    drawingPointerId = null
+                                }
+                                // No document edit in 2B-2.
+                            }
+                            is EditorGestureOwnership.Effect.Cancelled -> {
+                                if (drawingPointerId == effect.stroke.pointerId) {
+                                    drawingPointerId = null
+                                }
+                            }
+                        }
                     }
+                }
+
+                var tapPointerId: Long? = null
+                var tapEligible = false
+                var transformStarted = false
+                var panMotion = 0.0
+                var zoomMotion = 0.0
+
+                try {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(
+                                PointerEventPass.Main,
+                            )
+
+                            val fingerCount = event.changes.count {
+                                it.pressed && it.type == PointerType.Touch
+                            }
+
+                            // Register new contacts before processing movement.
+                            event.changes
+                                .filter { it.changedToDownIgnoreConsumed() }
+                                .forEach { change ->
+                                    val current = session?.takeIf {
+                                        it.layout == layout &&
+                                            it.viewport == viewportPx &&
+                                            it.gutterPx == gutterPx
+                                    }
+
+                                    val pageId = current?.let {
+                                        ViewportInteraction.hitTestVisiblePage(
+                                            PxPoint(
+                                                change.position.x.toDouble(),
+                                                change.position.y.toDouble(),
+                                            ),
+                                            layout,
+                                            it.transform,
+                                            viewportPx,
+                                        )?.pageId
+                                    }
+
+                                    processEffects(
+                                        owner.onDown(
+                                            pointerId = change.id.value,
+                                            contact = change.type.toEditorContact(),
+                                            selectedTool = selectedTool,
+                                            fingerMode = fingerMode,
+                                            fingerCount = fingerCount,
+                                            pageId = pageId,
+                                        ),
+                                    )
+
+                                    val onlyContact =
+                                        event.changes.count { it.pressed } == 1
+
+                                    if (
+                                        change.type == PointerType.Touch &&
+                                        onlyContact &&
+                                        owner.canNavigate()
+                                    ) {
+                                        tapPointerId = change.id.value
+                                        tapEligible = true
+                                    } else {
+                                        tapEligible = false
+                                    }
+
+                                    if (drawingPointerId == change.id.value) {
+                                        change.consume()
+                                    }
+                                }
+
+                            // Only pressed finger contacts participate in
+                            // navigation. Stylus input never changes the camera.
+                            val movingFingers = event.changes.filter {
+                                it.type == PointerType.Touch &&
+                                    it.pressed &&
+                                    it.previousPressed
+                            }
+
+                            if (
+                                owner.canNavigate() &&
+                                movingFingers.isNotEmpty()
+                            ) {
+                                val previousX = movingFingers
+                                    .map { it.previousPosition.x.toDouble() }
+                                    .average()
+                                val previousY = movingFingers
+                                    .map { it.previousPosition.y.toDouble() }
+                                    .average()
+
+                                val currentX = movingFingers
+                                    .map { it.position.x.toDouble() }
+                                    .average()
+                                val currentY = movingFingers
+                                    .map { it.position.y.toDouble() }
+                                    .average()
+
+                                val panX = currentX - previousX
+                                val panY = currentY - previousY
+
+                                val zoom = if (movingFingers.size > 1) {
+                                    val before = movingFingers.map {
+                                        hypot(
+                                            it.previousPosition.x - previousX,
+                                            it.previousPosition.y - previousY,
+                                        )
+                                    }.average()
+
+                                    val after = movingFingers.map {
+                                        hypot(
+                                            it.position.x - currentX,
+                                            it.position.y - currentY,
+                                        )
+                                    }.average()
+
+                                    if (before > 0.5) after / before else 1.0
+                                } else {
+                                    1.0
+                                }
+
+                                panMotion += hypot(panX, panY)
+                                val previousRadius = movingFingers.map {
+                                    hypot(
+                                        it.previousPosition.x - previousX,
+                                        it.previousPosition.y - previousY,
+                                    )
+                                }.average()
+
+                                zoomMotion += abs(1.0 - zoom) * previousRadius
+
+                                if (
+                                    !transformStarted &&
+                                    (
+                                        panMotion > viewConfiguration.touchSlop ||
+                                            zoomMotion > viewConfiguration.touchSlop
+                                        )
+                                ) {
+                                    transformStarted = true
+                                    tapEligible = false
+                                }
+
+                                if (transformStarted) {
+                                    val previous = session?.takeIf {
+                                        it.layout == layout &&
+                                            it.viewport == viewportPx &&
+                                            it.gutterPx == gutterPx
+                                    }
+
+                                    val fitScale = fitted?.scalePxPerDu
+
+                                    if (previous != null && fitScale != null) {
+                                        val next = ViewportNavigation.updateOrNull(
+                                            layout = layout,
+                                            viewport = viewportPx,
+                                            gutterPx = gutterPx,
+                                            fitScalePxPerDu = fitScale,
+                                            current = previous.transform,
+                                            centroidPreviousPx = PxPoint(
+                                                previousX,
+                                                previousY,
+                                            ),
+                                            panPx = PxPoint(panX, panY),
+                                            zoomChange = zoom,
+                                        )
+
+                                        if (next != null) {
+                                            session = previous.copy(transform = next)
+                                            saveViewportAnchor(next)
+                                        }
+                                    }
+
+                                    movingFingers.forEach { it.consume() }
+                                }
+                            }
+
+                            // Consume changes belonging to a drawing owner.
+                            // Live sample collection arrives in 2C.
+                            drawingPointerId?.let { id ->
+                                event.changes
+                                    .firstOrNull { it.id.value == id }
+                                    ?.consume()
+                            }
+
+                            event.changes
+                                .filter { it.changedToUpIgnoreConsumed() }
+                                .forEach { change ->
+                                    if (
+                                        change.id.value == tapPointerId &&
+                                        tapEligible &&
+                                        !transformStarted
+                                    ) {
+                                        val current = session?.takeIf {
+                                            it.layout == layout &&
+                                                it.viewport == viewportPx &&
+                                                it.gutterPx == gutterPx
+                                        }
+
+                                        if (current != null) {
+                                            selectedPageId =
+                                                ViewportInteraction.hitTestVisiblePage(
+                                                    PxPoint(
+                                                        change.position.x.toDouble(),
+                                                        change.position.y.toDouble(),
+                                                    ),
+                                                    layout,
+                                                    current.transform,
+                                                    viewportPx,
+                                                )?.pageId
+                                        }
+                                    }
+
+                                    processEffects(owner.onUp(change.id.value))
+
+                                    if (change.id.value == tapPointerId) {
+                                        tapPointerId = null
+                                    }
+                                }
+
+                            if (
+                                event.changes.none {
+                                    it.pressed && it.type == PointerType.Touch
+                                }
+                            ) {
+                                tapPointerId = null
+                                tapEligible = false
+                                transformStarted = false
+                                panMotion = 0.0
+                                zoomMotion = 0.0
+                            }
+                        }
+                    }
+                } finally {
+                    processEffects(owner.cancelAll())
                 }
             },
     ) {

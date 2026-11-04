@@ -154,4 +154,35 @@ class EditorGestureOwnershipTest {
             assertTrue(owner.onUp(10).isEmpty())
         }
     }
+
+    @Test
+    fun fingerNavigationContinuesAfterPinchContactLifts() {
+        down(
+            1,
+            EditorContact.FINGER,
+            mode = EditorFingerMode.WRITE,
+        )
+
+        val effects = down(
+            2,
+            EditorContact.FINGER,
+            mode = EditorFingerMode.WRITE,
+            count = 2,
+        )
+
+        assertTrue(
+            effects.single() is
+                EditorGestureOwnership.Effect.Cancelled
+        )
+        assertTrue(owner.canNavigate())
+
+        owner.onUp(2)
+
+        // The original finger is still pressed, but the
+        // cancelled stroke must never resume.
+        assertTrue(owner.canNavigate())
+
+        assertTrue(owner.onUp(1).isEmpty())
+        assertFalse(owner.canNavigate())
+    }
 }
