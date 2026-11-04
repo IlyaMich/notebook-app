@@ -27,6 +27,7 @@ import android.util.Log
 import kotlinx.coroutines.CancellationException
 import com.notebook.app.ui.editor.viewport.ContinuousPageViewport
 import com.notebook.app.ui.editor.viewport.toViewportSnapshot
+import androidx.compose.runtime.saveable.rememberSaveable
 
 /**
  * STO-06 vertical slice.
@@ -68,7 +69,9 @@ fun NoteEditorScreen(
     var showLeaveConfirmation by remember(noteId) {
         mutableStateOf(false)
     }
-
+    var fingerWritingPreview by rememberSaveable(noteId) {
+        mutableStateOf(false)
+    }
 
     LaunchedEffect(noteId) {
         // Essential initialization: these operations must succeed
@@ -287,6 +290,20 @@ fun NoteEditorScreen(
                     }
                 }
             }
+            TextButton(
+                onClick = {
+                    fingerWritingPreview = !fingerWritingPreview
+                },
+                modifier = Modifier.padding(start = 8.dp),
+            ) {
+                Text(
+                    if (fingerWritingPreview) {
+                        "Finger Pen preview: ON (not saved)"
+                    } else {
+                        "Enable finger Pen preview"
+                    }
+                )
+            }
 
             when {
                 error != null -> {
@@ -481,6 +498,7 @@ fun NoteEditorScreen(
                         pages = viewportSnapshot.pages,
                         storedPages = viewportSnapshot.storedPages,
                         documentKey = noteId,
+                        fingerWritingPreview = fingerWritingPreview,
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f),

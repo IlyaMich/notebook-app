@@ -52,6 +52,11 @@ import com.notebook.app.ui.editor.ink.EditorGestureOwnership
 import com.notebook.app.ui.editor.ink.EditorInkTool
 import kotlin.math.abs
 import kotlin.math.hypot
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.PointerInputChange
+import com.notebook.app.ui.editor.ink.EditorPenCapture
+import com.notebook.app.ui.editor.ink.EditorPenPoint
+import com.notebook.app.ui.editor.ink.EditorPenPreview
 
 /** Read-only snapshot for this checkpoint. Use page IDs/dimensions from DocumentRepository.load. */
 data class PageViewportItem(
@@ -102,6 +107,7 @@ fun ContinuousPageViewport(
     modifier: Modifier = Modifier,
     documentKey: String = pages.firstOrNull()?.id.orEmpty(),
     storedPages: Map<String, StoredPage> = emptyMap(),
+    fingerWritingPreview: Boolean = false,
 ) {
     val layout = remember(pages) {
         ViewportGeometry.layoutOrNull(pages.map { PageSizeDu(it.id, it.widthDu, it.heightDu) })
@@ -152,6 +158,9 @@ fun ContinuousPageViewport(
     // canvasSize would reset to the first page on every rotation or split-screen resize.
     var session by remember(documentKey) { mutableStateOf<ViewportSession?>(null) }
     var selectedPageId by remember(documentKey) { mutableStateOf<String?>(null) }
+    var livePenPreview by remember(documentKey) {
+        mutableStateOf<EditorPenPreview?>(null)
+    }
     // remember survives only recomposition, not a rotation that recreates the Activity.
     // Save a minimal, note-keyed page-local bookmark that can be rebuilt for any screen size.
     var savedPageId by rememberSaveable(documentKey) { mutableStateOf("") }
@@ -292,39 +301,120 @@ fun ContinuousPageViewport(
                 stateDescription = "Zoom $zoomPercent percent; $selectionLabel"
             }
             .onSizeChanged { canvasSize = it }
-            .pointerInput(documentKey, layout, canvasSize, gutterPx) {
+            .pointerInput(
+                documentKey,
+                layout,
+                canvasSize,
+                gutterPx,
+                fingerWritingPreview,
+            ) {
                 val owner = EditorGestureOwnership()
+                val capture = EditorPenCapture()
 
-                // EDT-09 2B-2: temporary routing configuration.
-                // Tool selection and finger mode will come from the
-                // production editor in the following checkpoints.
                 val selectedTool = EditorInkTool.PEN
-                val fingerMode = EditorFingerMode.NAVIGATE
+
+                val fingerMode = if (fingerWritingPreview) {
+                    EditorFingerMode.WRITE
+                } else {
+                    EditorFingerMode.NAVIGATE
+                }
 
                 var drawingPointerId: Long? = null
 
+
                 fun processEffects(
                     effects: List<EditorGestureOwnership.Effect>,
+                    initialPoint: EditorPenPoint? = null,
+                    cameraAtStart: ViewportTransform? = null,
                 ) {
                     effects.forEach { effect ->
                         when (effect) {
                             is EditorGestureOwnership.Effect.Started -> {
-                                drawingPointerId = effect.stroke.pointerId
+                                val started = if (
+                                    initialPoint != null &&
+                                    cameraAtStart != null
+                                ) {
+                                    capture.start(
+                                        pointerId = effect.stroke.pointerId,
+                                        pageId = effect.stroke.pageId,
+                                        transform = cameraAtStart,
+                                        viewport = viewportPx,
+                                        point = initialPoint,
+                                    )
+                                } else {
+                                    null
+                                }
+
+                                if (started != null) {
+                                    drawingPointerId = started.pointerId
+                                    livePenPreview = started
+                                } else {
+                                    drawingPointerId = null
+                                    livePenPreview = null
+                                }
                             }
+
                             is EditorGestureOwnership.Effect.Finished -> {
-                                if (drawingPointerId == effect.stroke.pointerId) {
+                                if (
+                                    drawingPointerId ==
+                                    effect.stroke.pointerId
+                                ) {
+                                    capture.finish(effect.stroke.pointerId)
                                     drawingPointerId = null
+
+                                    // 2C-1: Discard the completed preview.
+                                    // No document command is created.
+                                    livePenPreview = null
                                 }
-                                // No document edit in 2B-2.
                             }
+
                             is EditorGestureOwnership.Effect.Cancelled -> {
-                                if (drawingPointerId == effect.stroke.pointerId) {
-                                    drawingPointerId = null
-                                }
+                                capture.cancel()
+                                drawingPointerId = null
+                                livePenPreview = null
                             }
                         }
                     }
                 }
+
+                fun appendFromPointer(change: PointerInputChange) {
+                    if (drawingPointerId != change.id.value) return
+
+                    val current = capture.preview ?: return
+
+                    val point = EditorPenPoint(
+                        xPx = change.position.x.toDouble(),
+                        yPx = change.position.y.toDouble(),
+                        uptimeMs = change.uptimeMillis,
+                    )
+
+                    // Validate against the camera at stroke start.
+                    // The active stroke must not change page ownership.
+                    val hit = ViewportInteraction.hitTestVisiblePage(
+                        pointPx = PxPoint(point.xPx, point.yPx),
+                        layout = layout,
+                        transform = current.startTransform,
+                        viewport = current.startViewport,
+                    )
+
+                    if (hit?.pageId != current.pageId) {
+                        processEffects(owner.onConfigurationChanged())
+                        return
+                    }
+
+                    val updated = capture.append(
+                        pointerId = change.id.value,
+                        point = point,
+                    )
+
+                    if (updated == null) {
+                        // Invalid input, timestamp or sample limit.
+                        processEffects(owner.onConfigurationChanged())
+                    } else {
+                        livePenPreview = updated
+                    }
+                }
+
 
                 var tapPointerId: Long? = null
                 var tapEligible = false
@@ -366,7 +456,7 @@ fun ContinuousPageViewport(
                                     }
 
                                     processEffects(
-                                        owner.onDown(
+                                        effects = owner.onDown(
                                             pointerId = change.id.value,
                                             contact = change.type.toEditorContact(),
                                             selectedTool = selectedTool,
@@ -374,6 +464,12 @@ fun ContinuousPageViewport(
                                             fingerCount = fingerCount,
                                             pageId = pageId,
                                         ),
+                                        initialPoint = EditorPenPoint(
+                                            xPx = change.position.x.toDouble(),
+                                            yPx = change.position.y.toDouble(),
+                                            uptimeMs = change.uptimeMillis,
+                                        ),
+                                        cameraAtStart = current?.transform,
                                     )
 
                                     val onlyContact =
@@ -499,12 +595,25 @@ fun ContinuousPageViewport(
                                 }
                             }
 
-                            // Consume changes belonging to a drawing owner.
-                            // Live sample collection arrives in 2C.
+                            // Capture movement and the final pointer-up position
+                            // before processing the Finished effect.
                             drawingPointerId?.let { id ->
                                 event.changes
                                     .firstOrNull { it.id.value == id }
-                                    ?.consume()
+                                    ?.let { change ->
+                                        if (
+                                            change.previousPressed &&
+                                            change.position != change.previousPosition
+                                        ) {
+                                            appendFromPointer(change)
+                                        }
+
+                                        // Only the current drawing owner may
+                                        // consume this pointer's changes.
+                                        if (drawingPointerId == id) {
+                                            change.consume()
+                                        }
+                                    }
                             }
 
                             event.changes
@@ -557,6 +666,9 @@ fun ContinuousPageViewport(
                     }
                 } finally {
                     processEffects(owner.cancelAll())
+                    capture.cancel()
+                    drawingPointerId = null
+                    livePenPreview = null
                 }
             },
     ) {
@@ -598,6 +710,56 @@ fun ContinuousPageViewport(
                     }
                 }
             }
+
+            // EDT-09 2C-1: transient Pen preview.
+            // The camera remains frozen while this pointer owns drawing.
+            // These are screen-PX samples, not persisted document data.
+            livePenPreview
+                ?.takeIf { it.pageId == page.id }
+                ?.let { preview ->
+                    clipRect(
+                        left = left,
+                        top = top,
+                        right = left + width,
+                        bottom = top + height,
+                    ) {
+                        val samples = preview.samples
+                        val penColor = Color(0xFF2255AA)
+                        val penWidth = 4.dp.toPx()
+
+                        if (samples.size == 1) {
+                            val point = samples.first()
+
+                            drawCircle(
+                                color = penColor,
+                                radius = penWidth / 2f,
+                                center = Offset(
+                                    point.xPx.toFloat(),
+                                    point.yPx.toFloat(),
+                                ),
+                            )
+                        } else {
+                            for (index in 1 until samples.size) {
+                                val previous = samples[index - 1]
+                                val current = samples[index]
+
+                                drawLine(
+                                    color = penColor,
+                                    start = Offset(
+                                        previous.xPx.toFloat(),
+                                        previous.yPx.toFloat(),
+                                    ),
+                                    end = Offset(
+                                        current.xPx.toFloat(),
+                                        current.yPx.toFloat(),
+                                    ),
+                                    strokeWidth = penWidth,
+                                    cap = StrokeCap.Round,
+                                )
+                            }
+                        }
+                    }
+                }
 
             // The same page rectangle clips placeholder text now and will clip editable
             // elements and live stroke previews once those renderers exist.
