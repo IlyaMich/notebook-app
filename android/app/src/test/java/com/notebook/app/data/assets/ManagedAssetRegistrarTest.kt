@@ -149,6 +149,8 @@ class ManagedAssetRegistrarTest {
             rows.firstOrNull { it.relativePath == relativePath }
         override suspend fun listByState(state: String, limit: Int): List<AssetEntity> =
             rows.filter { it.state == state }.take(limit)
+        override suspend fun listAfterId(afterId: String?, limit: Int): List<AssetEntity> =
+            rows.filter { afterId == null || it.id > afterId }.sortedBy { it.id }.take(limit)
         override suspend fun countAll(): Int = rows.size
     }
 }

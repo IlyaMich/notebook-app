@@ -28,6 +28,10 @@ interface AssetDao {
     @Query("SELECT * FROM assets WHERE state = :state ORDER BY id ASC LIMIT :limit")
     suspend fun listByState(state: String, limit: Int): List<AssetEntity>
 
+    /** Keyset pagination for read-only, bounded crash-recovery inventory. */
+    @Query("SELECT * FROM assets WHERE (:afterId IS NULL OR id > :afterId) ORDER BY id ASC LIMIT :limit")
+    suspend fun listAfterId(afterId: String?, limit: Int): List<AssetEntity>
+
     @Query("SELECT COUNT(*) FROM assets")
     suspend fun countAll(): Int
 }
