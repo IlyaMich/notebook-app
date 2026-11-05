@@ -99,6 +99,21 @@ class NoteSaveStateTracker(initialRevision: Long) {
         return state
     }
 
+    /**
+     * A cancelled editor scope may prevent a queued worker from starting.
+     * Surface the pending command as failed rather than leaving a permanent
+     * PENDING state or a Deferred acknowledgement waiting forever.
+     */
+    fun onWorkerUnavailable(message: String): NoteSaveState {
+        check(state.pendingCommandCount > 0)
+        require(message.isNotBlank())
+        state = state.copy(
+            phase = SavePhase.FAILED,
+            failureMessage = message,
+        )
+        return state
+    }
+
     /** Failed command remains pending for recovery or retry. */
     fun onSaveFailed(message: String): NoteSaveState {
         check(state.phase == SavePhase.SAVING)
