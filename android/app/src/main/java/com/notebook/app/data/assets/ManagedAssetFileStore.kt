@@ -207,7 +207,17 @@ internal class ManagedAssetFileStore(
         if (Files.isSymbolicLink(lockFile.toPath())) {
             throw IOException("Symlink at asset publication lock")
         }
-        FileChannel.open(lockFile.toPath(), StandardOpenOption.WRITE, StandardOpenOption.CREATE).use { channel ->
+        // Enforce no-follow on the OPEN itself: a preflight symlink check alone
+        // cannot exclude substitution before the channel is opened.
+        FileChannel.open(
+            lockFile.toPath(),
+            StandardOpenOption.WRITE,
+            StandardOpenOption.CREATE,
+            LinkOption.NOFOLLOW_LINKS,
+        ).use { channel ->
+            if (!Files.isRegularFile(lockFile.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                throw IOException("Invalid asset publication lock file")
+            }
             channel.lock().use { action() }
         }
     }

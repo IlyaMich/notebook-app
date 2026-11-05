@@ -38,6 +38,11 @@
       </intent-filter>
     </activity>
 
+    <!-- STO-08 C2C-2C: debug-only, non-exported cross-process lock probe. -->
+    <service
+      android:name="com.notebook.app.data.assets.AssetLeaseCrossProcessProbeService"
+      android:process=":sto08_lease_probe"
+      android:exported="false" />
   </application>
 
 </manifest>
