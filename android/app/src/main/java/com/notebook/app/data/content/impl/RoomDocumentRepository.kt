@@ -40,9 +40,29 @@ class RoomDocumentRepository(
         StoredNoteContent(note.id, note.revision, pages)
     }
 
-    override suspend fun commit(noteId: String, edit: DocumentEdit): DocumentCommit = db.withTransaction {
+    override suspend fun commit(noteId: String, edit: DocumentEdit): DocumentCommit =
+        commitInTransaction(noteId, expectedRevision = null, edit = edit)
+
+    override suspend fun commitIfRevision(
+        noteId: String,
+        expectedRevision: Long,
+        edit: DocumentEdit,
+    ): DocumentCommit {
+        require(expectedRevision >= 0L) { "Expected note revision cannot be negative" }
+        return commitInTransaction(noteId, expectedRevision, edit)
+    }
+
+    /** Keep both guarded and legacy writes inside the same transaction boundary. */
+    private suspend fun commitInTransaction(
+        noteId: String,
+        expectedRevision: Long?,
+        edit: DocumentEdit,
+    ): DocumentCommit = db.withTransaction {
         val id = LibraryValidation.canonicalId(noteId)
         val note = db.noteDao().findById(id) ?: fail(LibraryErrorCode.NOT_FOUND, "Note not found")
+        if (expectedRevision != null && note.revision != expectedRevision) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Stale document edit: note revision has changed")
+        }
         if (note.deletedAtMillis != null) fail(LibraryErrorCode.INACTIVE_OWNER, "Note is in Trash")
         val notebook = db.notebookDao().findById(note.notebookId)
             ?: fail(LibraryErrorCode.INACTIVE_OWNER, "Notebook is missing")
