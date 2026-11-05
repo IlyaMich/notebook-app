@@ -3,6 +3,7 @@ package com.notebook.app.data.local
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import com.notebook.app.data.local.dao.AssetDao
+import com.notebook.app.data.local.dao.AssetOwnershipDao
 import com.notebook.app.data.local.dao.ElementDao
 import com.notebook.app.data.local.dao.PageDao
 import com.notebook.app.data.local.dao.FolderDao
@@ -41,4 +42,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun pageDao(): PageDao
     abstract fun elementDao(): ElementDao
     abstract fun assetDao(): AssetDao
+    abstract fun assetOwnershipDao(): AssetOwnershipDao
 }
