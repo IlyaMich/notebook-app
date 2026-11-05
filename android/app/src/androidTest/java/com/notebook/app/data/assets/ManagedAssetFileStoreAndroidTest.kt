@@ -8,6 +8,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.UUID
 import org.junit.After
@@ -110,6 +111,42 @@ class ManagedAssetFileStoreAndroidTest {
         // The production store now calls directory fsync before returning a new asset.
         // This is an API/filesystem support check, NOT a physical power-loss test.
         assertArrayEquals(pngHeader, File(sandbox, published.relativePath).readBytes())
+    }
+
+    @Test
+    fun symlinkPublicationLockRejectsWithoutChangingTarget(): Unit {
+        val target = File(sandbox, "untouched-lock-target.bin")
+        val original = byteArrayOf(1, 2, 3, 4)
+        target.writeBytes(original)
+        Files.createSymbolicLink(
+            File(sandbox, ".asset-publication.lock").toPath(), target.toPath(),
+        )
+        try {
+            ManagedAssetFileStore(sandbox).stageAndFinalize(
+                ByteArrayInputStream(pngHeader), "image/png",
+            )
+            fail("Publisher accepted symlink lock")
+        } catch (_: IOException) {
+            // Fail closed; never open or write through the linked lock file.
+        }
+        assertArrayEquals(original, target.readBytes())
+        assertFalse(File(sandbox, "assets").exists())
+    }
+
+    @Test
+    fun nonRegularPublicationLockRejectsWithoutCreatingFinalAsset(): Unit {
+        val lockPath = File(sandbox, ".asset-publication.lock")
+        assertTrue(lockPath.mkdir())
+        try {
+            ManagedAssetFileStore(sandbox).stageAndFinalize(
+                ByteArrayInputStream(pngHeader), "image/png",
+            )
+            fail("Publisher accepted non-regular lock node")
+        } catch (_: IOException) {
+            // Fail closed without creating an asset or modifying the lock node.
+        }
+        assertTrue(lockPath.isDirectory)
+        assertFalse(File(sandbox, "assets").exists())
     }
 
     private fun sha256(bytes: ByteArray): String =
