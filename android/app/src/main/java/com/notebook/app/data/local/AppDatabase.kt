@@ -9,6 +9,9 @@ import com.notebook.app.data.local.dao.FolderDao
 import com.notebook.app.data.local.dao.NotebookDao
 import com.notebook.app.data.local.dao.NoteDao
 import com.notebook.app.data.local.entity.AssetEntity
+import com.notebook.app.data.local.entity.PageAssetReferenceEntity
+import com.notebook.app.data.local.entity.ElementAssetReferenceEntity
+import com.notebook.app.data.local.entity.AssetReferenceIndexStateEntity
 import com.notebook.app.data.local.entity.ElementEntity
 import com.notebook.app.data.local.entity.PageEntity
 import com.notebook.app.data.local.entity.FolderEntity
@@ -25,8 +28,10 @@ import com.notebook.app.data.local.entity.NoteEntity
     entities = [
         FolderEntity::class, NotebookEntity::class, NoteEntity::class,
         PageEntity::class, ElementEntity::class, AssetEntity::class,
+        PageAssetReferenceEntity::class, ElementAssetReferenceEntity::class,
+        AssetReferenceIndexStateEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {

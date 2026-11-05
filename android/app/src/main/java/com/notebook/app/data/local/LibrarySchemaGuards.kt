@@ -46,6 +46,8 @@ internal object LibrarySchemaGuards {
                    BEGIN SELECT RAISE(ABORT, 'Folder cannot parent itself'); END""",
             )
             triggers.forEach(db::execSQL)
+            // Room v4 fresh database: start with an unverified ownership index.
+            AssetReferenceIndexGuards.initializeEmptyIndex(db)
         }
     }
 }

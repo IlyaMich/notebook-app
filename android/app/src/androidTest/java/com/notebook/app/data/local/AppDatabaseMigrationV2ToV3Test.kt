@@ -41,7 +41,7 @@ class AppDatabaseMigrationV2ToV3Test {
         val db = AppDatabaseProvider.openIsolated(context, name)
         opened = db
         val sql = db.openHelper.writableDatabase
-        assertEquals(3, sql.version)
+        assertEquals(4, sql.version)
 
         val active = db.noteDao().findById(ids.activeNote)!!
         assertEquals("Original active note", active.title)
@@ -93,7 +93,7 @@ class AppDatabaseMigrationV2ToV3Test {
         opened = null
         val reopened = AppDatabaseProvider.openIsolated(context, name)
         opened = reopened
-        assertEquals(3, reopened.openHelper.writableDatabase.version)
+        assertEquals(4, reopened.openHelper.writableDatabase.version)
         assertEquals(asset, reopened.assetDao().findById(asset.id))
         assertEquals("Original active note", reopened.noteDao().findById(ids.activeNote)?.title)
         assertEquals(1, reopened.elementDao().countByPage(ids.page))
@@ -110,7 +110,7 @@ class AppDatabaseMigrationV2ToV3Test {
             }
         }
         val attempt = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(failing)
+            .addMigrations(failing, AppDatabaseMigrations.MIGRATION_3_4)
             .build()
         val failure = try {
             runCatching { attempt.openHelper.writableDatabase }.exceptionOrNull()
@@ -142,7 +142,7 @@ class AppDatabaseMigrationV2ToV3Test {
 
         val recovered = AppDatabaseProvider.openIsolated(context, name)
         opened = recovered
-        assertEquals(3, recovered.openHelper.writableDatabase.version)
+        assertEquals(4, recovered.openHelper.writableDatabase.version)
         assertEquals(17L, recovered.noteDao().findById(ids.activeNote)?.revision)
         assertEquals(0, recovered.assetDao().countAll())
     }

@@ -21,7 +21,11 @@ object AppDatabaseProvider {
     private fun build(context: Context, name: String): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, name)
             .addCallback(LibrarySchemaGuards.callback)
-            .addMigrations(AppDatabaseMigrations.MIGRATION_1_2, AppDatabaseMigrations.MIGRATION_2_3)
+            .addMigrations(
+                AppDatabaseMigrations.MIGRATION_1_2,
+                AppDatabaseMigrations.MIGRATION_2_3,
+                AppDatabaseMigrations.MIGRATION_3_4,
+            )
             // Deliberately NO fallbackToDestructiveMigration().
             .build()
 }

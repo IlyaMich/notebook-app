@@ -1,6 +1,7 @@
 package com.notebook.app.data.local.migration
 
 import androidx.room.migration.Migration
+import com.notebook.app.data.local.AssetReferenceIndexGuards
 import androidx.sqlite.db.SupportSQLiteDatabase
 import java.util.UUID
 
@@ -83,6 +84,55 @@ internal object AppDatabaseMigrations {
             db.execSQL(
                 "CREATE UNIQUE INDEX IF NOT EXISTS `ux_assets_relative_path` ON `assets` (`relative_path`)"
             )
+        }
+    }
+
+    /**
+     * STO-08 C1B-2: additive ownership-index storage only.
+     * No legacy backfill, document rewrite or deletion.
+     */
+    val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `page_asset_references` (
+                    `page_id` TEXT NOT NULL,
+                    `asset_id` TEXT NOT NULL,
+                    PRIMARY KEY(`page_id`),
+                    FOREIGN KEY(`page_id`) REFERENCES `pages`(`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+                    FOREIGN KEY(`asset_id`) REFERENCES `assets`(`id`) ON UPDATE RESTRICT ON DELETE RESTRICT
+                )""".trimIndent()
+            )
+
+            db.execSQL(
+                """CREATE INDEX IF NOT EXISTS `ix_page_asset_references_asset`
+                   ON `page_asset_references` (`asset_id`)""".trimIndent()
+            )
+
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `element_asset_references` (
+                    `element_id` TEXT NOT NULL,
+                    `asset_id` TEXT NOT NULL,
+                    PRIMARY KEY(`element_id`),
+                    FOREIGN KEY(`element_id`) REFERENCES `elements`(`id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+                    FOREIGN KEY(`asset_id`) REFERENCES `assets`(`id`) ON UPDATE RESTRICT ON DELETE RESTRICT
+                )""".trimIndent()
+            )
+
+            db.execSQL(
+                """CREATE INDEX IF NOT EXISTS `ix_element_asset_references_asset`
+                   ON `element_asset_references` (`asset_id`)""".trimIndent()
+            )
+
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `asset_reference_index_state` (
+                    `id` INTEGER NOT NULL,
+                    `state` TEXT NOT NULL,
+                    PRIMARY KEY(`id`)
+                )""".trimIndent()
+            )
+
+            // Empty tables do NOT imply that historical assets are unowned.
+            AssetReferenceIndexGuards.initializeEmptyIndex(db)
         }
     }
 }

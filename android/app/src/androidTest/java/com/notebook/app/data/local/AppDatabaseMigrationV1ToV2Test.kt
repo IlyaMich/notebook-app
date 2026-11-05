@@ -193,7 +193,7 @@ class AppDatabaseMigrationV1ToV2Test {
         assertEquals(pages, reopened.pageDao().listByNote(activeNoteId))
         assertEquals(2, reopened.noteDao().countAll())
         assertEquals(0, reopened.elementDao().countByPage(pages.single().id))
-        assertEquals(3, reopened.openHelper.writableDatabase.version)
+        assertEquals(4, reopened.openHelper.writableDatabase.version)
     }
 
     @Test
@@ -268,7 +268,7 @@ class AppDatabaseMigrationV1ToV2Test {
             name,
         )
             .addCallback(LibrarySchemaGuards.callback)
-            .addMigrations(failingMigration, AppDatabaseMigrations.MIGRATION_2_3)
+            .addMigrations(failingMigration, AppDatabaseMigrations.MIGRATION_2_3, AppDatabaseMigrations.MIGRATION_3_4)
             .build()
 
         val failure = try {
@@ -356,9 +356,9 @@ class AppDatabaseMigrationV1ToV2Test {
         )
         opened = recovered
 
-        // Force normal migration and verify V3.
+        // Force normal migration and verify V4.
         assertEquals(
-            3,
+            4,
             recovered.openHelper.writableDatabase.version,
         )
 
@@ -394,11 +394,11 @@ class AppDatabaseMigrationV1ToV2Test {
         val noteId = UUID.randomUUID().toString()
         val pageId = UUID.randomUUID().toString()
 
-        // Step 1: Create a genuine Room V3 database containing
+        // Step 1: Create a genuine Room V4 database containing
         // existing notebook, note, and page records.
-        val v3 = AppDatabaseProvider.openIsolated(context, name)
+        val v4 = AppDatabaseProvider.openIsolated(context, name)
         try {
-            val sql = v3.openHelper.writableDatabase
+            val sql = v4.openHelper.writableDatabase
 
             sql.execSQL(
                 """INSERT INTO notebooks
@@ -428,7 +428,7 @@ class AppDatabaseMigrationV1ToV2Test {
                 ),
             )
         } finally {
-            v3.close()
+            v4.close()
         }
 
         // Step 2: Simulate a future application introducing
@@ -438,22 +438,22 @@ class AppDatabaseMigrationV1ToV2Test {
         )
         try {
             future.execSQL(
-                """CREATE TABLE future_v4_marker (
+                """CREATE TABLE future_v5_marker (
                 id INTEGER PRIMARY KEY NOT NULL,
                 payload TEXT NOT NULL
             )"""
             )
             future.execSQL(
-                """INSERT INTO future_v4_marker (id, payload)
+                """INSERT INTO future_v5_marker (id, payload)
                VALUES (1, 'must survive downgrade attempt')"""
             )
-            future.version = 4
+            future.version = 5
         } finally {
             future.close()
         }
 
-        // Step 3: Try to open the V4 database using the current
-        // V3 provider. No downgrade migration exists.
+        // Step 3: Try to open the V5 database using the current
+        // V4 provider. No downgrade migration exists.
         val incompatible = AppDatabaseProvider.openIsolated(
             context, name
         )
@@ -468,7 +468,7 @@ class AppDatabaseMigrationV1ToV2Test {
         }
 
         assertTrue(
-            "Room V3 must reject an unsupported V4 database",
+            "Room V4 must reject an unsupported V5 database",
             failure != null,
         )
 
@@ -490,7 +490,7 @@ class AppDatabaseMigrationV1ToV2Test {
             name, Context.MODE_PRIVATE, null
         )
         try {
-            assertEquals(4, verify.version)
+            assertEquals(5, verify.version)
 
             verify.rawQuery(
                 "SELECT title, revision FROM notes WHERE id = ?",
@@ -510,7 +510,7 @@ class AppDatabaseMigrationV1ToV2Test {
             }
 
             verify.rawQuery(
-                "SELECT payload FROM future_v4_marker WHERE id = 1",
+                "SELECT payload FROM future_v5_marker WHERE id = 1",
                 null,
             ).use { cursor ->
                 assertTrue(cursor.moveToFirst())
