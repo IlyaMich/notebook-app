@@ -113,7 +113,16 @@ internal class EditorGestureOwnership {
             }
 
             EditorPointerAction.NAVIGATE -> {
-                if (contact == EditorContact.FINGER) {
+                // A finger that lands while the stylus is drawing
+                // may be a palm-rest contact. It must not acquire
+                // navigation ownership after the stylus releases.
+                //
+                // Finger navigation established before the stylus
+                // started remains registered and may resume later.
+                if (
+                    contact == EditorContact.FINGER &&
+                    activeStroke?.contact != EditorContact.STYLUS
+                ) {
                     navigationPointers += pointerId
                 }
             }

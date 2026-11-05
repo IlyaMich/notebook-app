@@ -185,4 +185,110 @@ class EditorGestureOwnershipTest {
         assertTrue(owner.onUp(1).isEmpty())
         assertFalse(owner.canNavigate())
     }
+
+    @Test
+    fun fingerJoiningStylusCannotNavigateAfterStylusRelease() {
+        val started = down(1, EditorContact.STYLUS)
+
+        assertTrue(
+            started.single() is
+                EditorGestureOwnership.Effect.Started
+        )
+
+        // Finger lands while the stylus owns the gesture.
+        assertTrue(
+            down(
+                2,
+                EditorContact.FINGER,
+                mode = EditorFingerMode.NAVIGATE,
+            ).isEmpty()
+        )
+
+        assertFalse(owner.canNavigate())
+
+        // Releasing the stylus completes its stroke.
+        assertTrue(
+            owner.onUp(1).single() is
+                EditorGestureOwnership.Effect.Finished
+        )
+
+        // The remaining finger must not become navigation.
+        assertFalse(owner.canNavigate())
+
+        assertTrue(owner.onUp(2).isEmpty())
+        assertFalse(owner.canNavigate())
+
+        // Navigation works again with a fresh finger-down.
+        assertTrue(
+            down(3, EditorContact.FINGER).isEmpty()
+        )
+        assertTrue(owner.canNavigate())
+
+        owner.onUp(3)
+        assertFalse(owner.canNavigate())
+    }
+
+    @Test
+    fun earlierNavigationResumesButNewPalmDoesNot() {
+        // A finger starts navigation before the stylus.
+        down(1, EditorContact.FINGER)
+        assertTrue(owner.canNavigate())
+
+        // Stylus temporarily suspends navigation.
+        down(2, EditorContact.STYLUS)
+        assertFalse(owner.canNavigate())
+
+        // A second finger lands while the stylus writes.
+        down(
+            3,
+            EditorContact.FINGER,
+            count = 2,
+        )
+
+        assertFalse(owner.canNavigate())
+
+        // Stylus completes; original navigation resumes.
+        assertTrue(
+            owner.onUp(2).single() is
+                EditorGestureOwnership.Effect.Finished
+        )
+        assertTrue(owner.canNavigate())
+
+        // The original navigating finger leaves.
+        owner.onUp(1)
+
+        // Only the palm contact remains. It must not navigate.
+        assertFalse(owner.canNavigate())
+
+        owner.onUp(3)
+        assertFalse(owner.canNavigate())
+    }
+
+    @Test
+    fun palmReleaseDoesNotCancelOrFinishStylusStroke() {
+        down(1, EditorContact.STYLUS)
+
+        down(
+            2,
+            EditorContact.FINGER,
+            mode = EditorFingerMode.NAVIGATE,
+        )
+
+        // Palm lifts before the stylus.
+        assertTrue(owner.onUp(2).isEmpty())
+
+        // Stylus still owns the original drawing.
+        assertFalse(owner.canNavigate())
+
+        val finished = owner.onUp(1)
+
+        assertEquals(1, finished.size)
+        assertTrue(
+            finished.single() is
+                EditorGestureOwnership.Effect.Finished
+        )
+
+        // Duplicate release is ignored.
+        assertTrue(owner.onUp(1).isEmpty())
+    }
 }
