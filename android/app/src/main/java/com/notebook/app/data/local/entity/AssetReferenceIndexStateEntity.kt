@@ -5,12 +5,12 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 
 /**
- * STO-08 C1B-2A: persisted index-completeness gate, NOT a GC permission.
+ * STO-08 C1B-2: persisted index-completeness gate, NOT a GC permission.
  *
- * C1B-2B must enforce singleton ID 1 and recognized state values at the SQLite
- * level on both fresh creation and migration, initializing UNVERIFIED in both.
- * Missing/invalid state is always unsafe; no code may automatically set VERIFIED.
- * This declaration is not yet registered in AppDatabase or used by readers.
+ * SQLite triggers constrain singleton ID 1 and permissible state transitions
+ * on both fresh creation and v3-to-v4 migration, starting UNVERIFIED.
+ * Direct promotion to VERIFIED remains prohibited pending reviewed audit work.
+ * Missing/invalid state must be treated as unsafe by future cleanup readers.
  */
 @Entity(tableName = "asset_reference_index_state")
 data class AssetReferenceIndexStateEntity(

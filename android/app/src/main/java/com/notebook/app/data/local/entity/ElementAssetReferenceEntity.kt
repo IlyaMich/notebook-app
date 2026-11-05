@@ -7,10 +7,10 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
- * STO-08 C1B-2A: proposed durable projection of an image element's direct owner.
+ * STO-08 C1B-2: durable projection of an image element's direct owner.
  *
- * Not registered in AppDatabase until the explicit v3 -> v4 migration and
- * historical tests are ready. Canonical elements.element_json remains authoritative.
+ * Registered in Room v4. Canonical elements.element_json remains authoritative.
+ * Legacy backfill and transactional writers are pending.
  * Empty or incomplete reference tables must never authorize asset deletion.
  */
 @Entity(
