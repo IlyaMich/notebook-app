@@ -271,7 +271,7 @@ class AssetOwnershipTransactionBoundaryAndroidTest {
         gateUnverified()
     }
 
-    @Test fun confirmedPurgeWithInconsistentIndexedOwnerRollsBackEntireDeletion() = runBlocking {
+    @Test fun purgePreflightRejectsUnexpectedIndexedOwnerBeforeConfirmation() = runBlocking {
         val (noteId, pageId) = blankOwner()
         val syntheticAsset = asset("application/pdf")
         db.assetOwnershipDao().insertPageReference(PageAssetReferenceEntity(pageId, syntheticAsset))
@@ -279,11 +279,10 @@ class AssetOwnershipTransactionBoundaryAndroidTest {
         val batch = trash.trashNote(noteId)
         val before = db.noteDao().findById(noteId)!!
         val beforePage = db.pageDao().findById(pageId)!!
-        val preview = trash.previewPurge(batch)
+        val failure = runCatching { trash.previewPurge(batch) }.exceptionOrNull()
 
-        val failure = runCatching { trash.purgeBatch(preview) }.exceptionOrNull()
-
-        assertNotNull("RESTRICT must abort destructive purge", failure)
+        assertTrue("Preflight must reject unexpected indexed ownership", failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT, (failure as LibraryOperationException).code)
         assertEquals(before, db.noteDao().findById(noteId))
         assertEquals(beforePage, db.pageDao().findById(pageId))
         assertEquals(PageAssetReferenceEntity(pageId, syntheticAsset),
@@ -292,6 +291,108 @@ class AssetOwnershipTransactionBoundaryAndroidTest {
         db.openHelper.writableDatabase.query("PRAGMA foreign_key_check").use {
             assertEquals(0, it.count)
         }
+        gateUnverified()
+    }
+
+    @Test fun cloneRejectsUnexpectedPageReferenceWithoutCreatingNewNote() = runBlocking {
+        val (noteId, pageId) = blankOwner()
+        val assetId = asset("application/pdf")
+        db.assetOwnershipDao().insertPageReference(PageAssetReferenceEntity(pageId, assetId))
+        val originalNote = db.noteDao().findById(noteId)!!
+        val originalPage = db.pageDao().findById(pageId)!!
+
+        val failure = runCatching {
+            LibraryRepositoryFactory(db).noteLifecycle().duplicateNote(noteId, null)
+        }.exceptionOrNull()
+
+        assertTrue("Indexed page must not be cloned without a writer", failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT, (failure as LibraryOperationException).code)
+        assertEquals(originalNote, db.noteDao().findById(noteId))
+        assertEquals(originalPage, db.pageDao().findById(pageId))
+        db.openHelper.writableDatabase.query("SELECT COUNT(*) FROM notes").use {
+            assertTrue(it.moveToFirst())
+            assertEquals(1, it.getInt(0))
+        }
+        assertEquals(1, db.pageDao().countAll())
+        assertEquals(PageAssetReferenceEntity(pageId, assetId),
+            db.assetOwnershipDao().findPageReference(pageId))
+        gateUnverified()
+    }
+
+    @Test fun cloneRejectsUnexpectedElementReferenceWithoutPartialCopy() = runBlocking {
+        val (noteId, pageId) = blankOwner()
+        val elementId = id()
+        db.elementDao().insert(ElementEntity(elementId, pageId, 0L, "text", textJson(elementId), 0L))
+        val assetId = asset("image/png")
+        db.assetOwnershipDao().insertElementReference(ElementAssetReferenceEntity(elementId, assetId))
+        val original = db.elementDao().findById(elementId)!!
+
+        val failure = runCatching {
+            LibraryRepositoryFactory(db).noteLifecycle().duplicateNote(noteId, null)
+        }.exceptionOrNull()
+
+        assertTrue("Indexed element must not be cloned without a writer", failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT, (failure as LibraryOperationException).code)
+        assertEquals(original, db.elementDao().findById(elementId))
+        db.openHelper.writableDatabase.query("SELECT COUNT(*) FROM notes").use {
+            assertTrue(it.moveToFirst())
+            assertEquals(1, it.getInt(0))
+        }
+        assertEquals(1, db.pageDao().countAll())
+        assertEquals(1, db.elementDao().countAll())
+        assertEquals(ElementAssetReferenceEntity(elementId, assetId),
+            db.assetOwnershipDao().findElementReference(elementId))
+        gateUnverified()
+    }
+
+    @Test fun nonMediaContentEditsRejectUnexpectedEdgesAndKeepRevision() = runBlocking {
+        val (noteId, firstPageId) = blankOwner()
+        val secondPageId = id()
+        db.pageDao().insert(PageEntity(secondPageId, noteId, 1L, 612.0, 792.0, BLANK, 0L))
+        val elementId = id()
+        db.elementDao().insert(ElementEntity(elementId, firstPageId, 0L, "text", textJson(elementId), 0L))
+        val pdf = asset("application/pdf")
+        val image = asset("image/png")
+        val dao = db.assetOwnershipDao()
+        dao.insertPageReference(PageAssetReferenceEntity(firstPageId, pdf))
+        dao.insertElementReference(ElementAssetReferenceEntity(elementId, image))
+        val repo = RoomDocumentRepository(db)
+        val before = repo.load(noteId)
+        val edits = listOf(
+            DocumentEdit.ChangeBackground(firstPageId, """{"type":"blank","color":"#000000"}"""),
+            DocumentEdit.ReplaceElements(firstPageId, listOf(textJson(elementId).replace("Keep", "Updated"))),
+            DocumentEdit.RemoveElements(firstPageId, listOf(elementId)),
+            DocumentEdit.TransferElements(firstPageId, secondPageId, listOf(elementId)),
+        )
+        for (edit in edits) {
+            val failure = runCatching { repo.commit(noteId, edit) }.exceptionOrNull()
+            assertTrue("Inconsistent indexed owner must reject $edit", failure is LibraryOperationException)
+            assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT, (failure as LibraryOperationException).code)
+            assertEquals(before, repo.load(noteId))
+            assertEquals(PageAssetReferenceEntity(firstPageId, pdf), dao.findPageReference(firstPageId))
+            assertEquals(ElementAssetReferenceEntity(elementId, image), dao.findElementReference(elementId))
+        }
+        assertEquals(0L, db.noteDao().findById(noteId)!!.revision)
+        gateUnverified()
+    }
+
+    @Test fun confirmedPurgeRechecksOwnershipAddedAfterPreview() = runBlocking {
+        val (noteId, pageId) = blankOwner()
+        val trash = LibraryRepositoryFactory(db).trash
+        val batch = trash.trashNote(noteId)
+        val preview = trash.previewPurge(batch)
+        val beforeNote = db.noteDao().findById(noteId)!!
+        val beforePage = db.pageDao().findById(pageId)!!
+        val pdf = asset("application/pdf")
+        db.assetOwnershipDao().insertPageReference(PageAssetReferenceEntity(pageId, pdf))
+
+        val failure = runCatching { trash.purgeBatch(preview) }.exceptionOrNull()
+        assertTrue("Purge must re-run indexed ownership preflight", failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT, (failure as LibraryOperationException).code)
+        assertEquals(beforeNote, db.noteDao().findById(noteId))
+        assertEquals(beforePage, db.pageDao().findById(pageId))
+        assertEquals(PageAssetReferenceEntity(pageId, pdf),
+            db.assetOwnershipDao().findPageReference(pageId))
         gateUnverified()
     }
 
