@@ -85,6 +85,83 @@ internal object EditorEraserAffineClipping {
             !padding.isFinite()
         ) return Verdict.UNRESOLVED_GEOMETRY
 
+        // Conservative whole-gesture AABB prefilter.
+        //
+        // For a transformed circular brush, the exact
+        // maximum X/Y displacements are derived from
+        // the corresponding affine matrix row norms.
+        //
+        // Padding is outward-only: ambiguous boundaries
+        // must never become false misses.
+        val strokePaddingX =
+            strokeRadius * hypot(transform.a, transform.c) +
+                padding
+
+        val strokePaddingY =
+            strokeRadius * hypot(transform.b, transform.d) +
+                padding
+
+        val eraserPadding = eraserRadiusPageDu + padding
+
+        if (
+            !listOf(
+                strokePaddingX,
+                strokePaddingY,
+                eraserPadding,
+            ).all(Double::isFinite)
+        ) {
+            return Verdict.UNRESOLVED_GEOMETRY
+        }
+
+        val strokeLeft =
+            pointsPage.minOf { it.x } - strokePaddingX
+        val strokeRight =
+            pointsPage.maxOf { it.x } + strokePaddingX
+        val strokeTop =
+            pointsPage.minOf { it.y } - strokePaddingY
+        val strokeBottom =
+            pointsPage.maxOf { it.y } + strokePaddingY
+
+        val eraserLeft =
+            eraserPointsPageDu.minOf { it.x } - eraserPadding
+        val eraserRight =
+            eraserPointsPageDu.maxOf { it.x } + eraserPadding
+        val eraserTop =
+            eraserPointsPageDu.minOf { it.y } - eraserPadding
+        val eraserBottom =
+            eraserPointsPageDu.maxOf { it.y } + eraserPadding
+
+        if (
+            !listOf(
+                strokeLeft, strokeRight,
+                strokeTop, strokeBottom,
+                eraserLeft, eraserRight,
+                eraserTop, eraserBottom,
+            ).all(Double::isFinite)
+        ) {
+            return Verdict.UNRESOLVED_GEOMETRY
+        }
+
+        if (
+        // Entire stroke or eraser lies outside the page.
+            strokeRight < 0.0 ||
+            strokeLeft > pageWidthDu ||
+            strokeBottom < 0.0 ||
+            strokeTop > pageHeightDu ||
+            eraserRight < 0.0 ||
+            eraserLeft > pageWidthDu ||
+            eraserBottom < 0.0 ||
+            eraserTop > pageHeightDu ||
+
+            // Their painted bounding boxes are disjoint.
+            strokeRight < eraserLeft ||
+            eraserRight < strokeLeft ||
+            strokeBottom < eraserTop ||
+            eraserBottom < strokeTop
+        ) {
+            return Verdict.NO_VISIBLE_HIT
+        }
+
         val page = listOf(
             Point(0.0, 0.0),
             Point(pageWidthDu, 0.0),

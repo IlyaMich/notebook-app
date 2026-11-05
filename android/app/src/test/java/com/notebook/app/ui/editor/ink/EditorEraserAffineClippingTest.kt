@@ -181,4 +181,47 @@ class EditorEraserAffineClippingTest {
             eraser = listOf(p(50.0, 50.0)),
         )
     }
+
+    @Test
+    fun stronglyShearedBrushIsNotFalselyRejected() {
+        // The X extent of this transformed circular brush
+        // exceeds either individual matrix column length.
+        // A correct broad-phase must use row norms.
+        assertEquals(
+            Verdict.CONFIRMED_VISIBLE_HIT,
+            classify(
+                stroke = listOf(p(0.0, 0.0)),
+                eraser = listOf(p(62.0, 50.5)),
+                transform = Affine(
+                    a = 1.0,
+                    b = 0.0,
+                    c = 1.0,
+                    d = 0.1,
+                    tx = 50.0,
+                    ty = 50.0,
+                ),
+                width = 20.0,
+                radius = 0.5,
+            ),
+        )
+    }
+
+    @Test
+    fun longDistantSweepIsRejectedWithoutPolygonOverlap() {
+        val stroke = (0..1200).map { index ->
+            p(10.0 + index * 0.05, 20.0)
+        }
+
+        val eraser = (0..400).map { index ->
+            p(10.0 + index * 0.1, 90.0)
+        }
+
+        assertEquals(
+            Verdict.NO_VISIBLE_HIT,
+            classify(
+                stroke = stroke,
+                eraser = eraser,
+            ),
+        )
+    }
 }

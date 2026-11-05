@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Assert.assertNull
 
 class EditorEraserCanonicalHitTestTest {
 
@@ -28,6 +29,7 @@ class EditorEraserCanonicalHitTestTest {
         d: Double = 1.0,
         tx: Double = 0.0,
         ty: Double = 0.0,
+        opacity: Double = 1.0,
         locked: Boolean = false,
     ): String = """
         {
@@ -41,7 +43,7 @@ class EditorEraserCanonicalHitTestTest {
               "kind": "pen",
               "width": 2.0,
               "color": "#2255AA",
-              "opacity": 1.0
+              "opacity": $opacity
             },
             "points": [
               {"x": 0.0, "y": 0.0, "tMs": 0},
@@ -181,7 +183,7 @@ class EditorEraserCanonicalHitTestTest {
             result.lockedElementIds,
         )
     }
-    
+
     @Test
     fun nonuniformTransformIsSupportedAndNotReportedAsUnsupported() {
         val nonuniform = strokeEnvelope(
@@ -418,5 +420,99 @@ class EditorEraserCanonicalHitTestTest {
 
         assertTrue(result.hasUnresolvedAffineGeometry)
         assertTrue(result.hasBlockingUncertainty)
+    }
+
+    @Test
+    fun zeroOpacityStrokeCannotBecomeEraserCandidate() {
+        val result = scan(
+            page(
+                envelope = strokeEnvelope(
+                    ty = 50.0,
+                    opacity = 0.0,
+                )
+            ),
+            listOf(p(50.0, 50.0)),
+        )
+
+        assertTrue(result.hitElementIds.isEmpty())
+        assertFalse(result.hasBlockingUncertainty)
+    }
+
+    @Test
+    fun opacityRoundedToZeroIsExcluded() {
+        val result = scan(
+            page(
+                envelope = strokeEnvelope(
+                    ty = 50.0,
+                    opacity = 0.001,
+                )
+            ),
+            listOf(p(50.0, 50.0)),
+        )
+
+        assertTrue(result.hitElementIds.isEmpty())
+        assertFalse(result.hasBlockingUncertainty)
+    }
+
+    @Test
+    fun lowButRenderableOpacityRemainsErasable() {
+        val result = scan(
+            page(
+                envelope = strokeEnvelope(
+                    ty = 50.0,
+                    opacity = 0.01,
+                )
+            ),
+            listOf(p(50.0, 50.0)),
+        )
+
+        assertEquals(
+            listOf(strokeId),
+            result.hitElementIds,
+        )
+        assertFalse(result.hasBlockingUncertainty)
+    }
+
+    @Test
+    fun uncertainScanCannotExposeDeletionCandidates() {
+        val result = EditorEraserCanonicalHitTest.ScanResult(
+            hitElementIds = listOf(strokeId),
+            lockedElementIds = emptyList(),
+            unsupportedTransformElementIds = emptyList(),
+            unresolvedAffineGeometryElementIds =
+                listOf("uncertain-stroke"),
+        )
+
+        assertTrue(result.hasBlockingUncertainty)
+        assertNull(result.confirmedHitsIfUnambiguous)
+    }
+
+    @Test
+    fun unsupportedTransformBlocksCandidateUse() {
+        val result = EditorEraserCanonicalHitTest.ScanResult(
+            hitElementIds = listOf(strokeId),
+            lockedElementIds = emptyList(),
+            unsupportedTransformElementIds =
+                listOf("unsupported-stroke"),
+        )
+
+        assertTrue(result.hasBlockingUncertainty)
+        assertNull(result.confirmedHitsIfUnambiguous)
+    }
+
+    @Test
+    fun unambiguousScanExposesOnlyConfirmedCandidates() {
+        val result = EditorEraserCanonicalHitTest.ScanResult(
+            hitElementIds = listOf(strokeId),
+            lockedElementIds = listOf("locked-stroke"),
+            unsupportedTransformElementIds = emptyList(),
+        )
+
+        assertFalse(result.hasBlockingUncertainty)
+
+        assertEquals(
+            listOf(strokeId),
+            result.confirmedHitsIfUnambiguous,
+        )
     }
 }

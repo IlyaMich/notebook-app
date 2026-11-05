@@ -10,6 +10,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 /**
  * Read-only hit-testing against existing canonical strokes.
@@ -53,6 +54,23 @@ internal object EditorEraserCanonicalHitTest {
             get() = hasUnsupportedTransforms ||
                 hasUnresolvedPageClipping ||
                 hasUnresolvedAffineGeometry
+
+        /**
+         * Returns geometric hit candidates only when the
+         * complete scan contains no blocking uncertainty.
+         *
+         * null means that no destructive action is permitted
+         * from this scan result.
+         *
+         * These are not yet authorized DocumentEdit commands:
+         * undo/redo and transaction checks are still required.
+         */
+        val confirmedHitsIfUnambiguous: List<String>?
+            get() = if (hasBlockingUncertainty) {
+                null
+            } else {
+                hitElementIds
+            }
     }
 
     fun scan(
@@ -136,6 +154,25 @@ internal object EditorEraserCanonicalHitTest {
 
             if (isLocked) {
                 locked += stroke.elementId
+                continue
+            }
+
+            // Match the effective alpha used by the production
+            // canonical Canvas renderer. A stroke that paints no
+            // pixels must not be eligible for visible-ink erasing.
+            require(
+                stroke.brush.opacity.isFinite() &&
+                    stroke.brush.opacity in 0.0..1.0
+            ) {
+                "Invalid canonical stroke opacity"
+            }
+
+            val effectiveAlpha =
+                (stroke.brush.opacity * 255.0)
+                    .roundToInt()
+                    .coerceIn(0, 255)
+
+            if (effectiveAlpha == 0) {
                 continue
             }
 
