@@ -10,6 +10,7 @@ import com.notebook.app.data.library.LibraryOperationException
 import com.notebook.app.data.library.model.InitialPageSpec
 import com.notebook.app.data.local.AppDatabase
 import com.notebook.app.data.local.AppDatabaseProvider
+import com.notebook.app.data.local.entity.ElementEntity
 import com.notebook.app.data.local.entity.NoteEntity
 import com.notebook.app.data.local.entity.NotebookEntity
 import com.notebook.app.data.local.entity.PageEntity
@@ -211,6 +212,80 @@ class RoomDocumentRepositoryIntegrationTest {
             repo.commit(note.id, DocumentEdit.ChangeBackground(page, GRID))
         }
         // Snapshot still available for eventual Trash restore; it does not edit content.
+        assertEquals(original, repo.load(note.id))
+    }
+
+    @Test fun legacyPdfBackgroundCannotBeReplacedOrSilentlyDiscarded() = runBlocking {
+        val note = fixture()
+        val page = db.pageDao().listByNote(note.id).single()
+        val legacyPdf = """{"type":"pdfPage","assetId":"${id()}","pageIndex":0,"displayBox":"crop"}"""
+        assertEquals(1, db.pageDao().update(page.copy(backgroundJson = legacyPdf)))
+        val original = repo.load(note.id)
+
+        expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) {
+            repo.commit(note.id, DocumentEdit.ChangeBackground(page.id, BLANK))
+        }
+        expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) {
+            repo.commit(note.id, DocumentEdit.ChangeBackground(page.id, GRID))
+        }
+        assertEquals(original, repo.load(note.id))
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, file)
+        repo = RoomDocumentRepository(db)
+        assertEquals(original, repo.load(note.id))
+    }
+
+    @Test fun legacyImageCannotBeReplacedByValidTextInABatch() = runBlocking {
+        val note = fixture()
+        val pageId = repo.load(note.id).pages.single().id
+        val imageId = id()
+        val textId = id()
+        db.elementDao().insert(ElementEntity(imageId, pageId, 0, "image", image(imageId), 0))
+        db.elementDao().insert(ElementEntity(textId, pageId, 1, "text", text(textId, "Before"), 0))
+        val original = repo.load(note.id)
+
+        expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) {
+            repo.commit(note.id, DocumentEdit.ReplaceElements(pageId, listOf(
+                text(textId, "Changed"), text(imageId, "Converted"),
+            )))
+        }
+        assertEquals(original, repo.load(note.id))
+
+        // An unrelated ordinary text edit remains permitted.
+        assertEquals(1L, repo.commit(note.id, DocumentEdit.ReplaceElements(
+            pageId, listOf(text(textId, "Allowed")),
+        )).revision)
+        val after = repo.load(note.id)
+        assertEquals(original.pages.single().elements.first(), after.pages.single().elements.first())
+        assertEquals(text(textId, "Allowed"), after.pages.single().elements.last().envelopeJson)
+    }
+
+    @Test fun imageEnvelopeCannotBypassGuardsWhenIndexedKindIsWrong() = runBlocking {
+        val note = fixture()
+        val first = db.pageDao().listByNote(note.id).single()
+        val second = id()
+        db.pageDao().insert(PageEntity(second, note.id, 1, 612.0, 792.0, BLANK, 0))
+        val imageId = id()
+        // Simulates an inconsistent legacy row: kind says text, envelope says image.
+        db.elementDao().insert(ElementEntity(imageId, first.id, 0, "text", image(imageId), 0))
+        val original = repo.load(note.id)
+
+        expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) {
+            repo.commit(note.id, DocumentEdit.ReplaceElements(first.id, listOf(text(imageId, "Converted"))))
+        }
+        expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) {
+            repo.commit(note.id, DocumentEdit.RemoveElements(first.id, listOf(imageId)))
+        }
+        expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) {
+            repo.commit(note.id, DocumentEdit.TransferElements(first.id, second, listOf(imageId)))
+        }
+        expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) {
+            repo.commit(note.id, DocumentEdit.RemovePage(first.id))
+        }
+        assertEquals(original, repo.load(note.id))
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, file)
+        repo = RoomDocumentRepository(db)
         assertEquals(original, repo.load(note.id))
     }
 

@@ -63,4 +63,26 @@ internal object AppDatabaseMigrations {
             }
         }
     }
+    /** Add metadata only. Never rewrite/delete legacy notes, pages, elements or Trash rows. */
+    val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `assets` (
+                    `id` TEXT NOT NULL,
+                    `sha256` TEXT NOT NULL,
+                    `mime_type` TEXT NOT NULL,
+                    `byte_size` INTEGER NOT NULL,
+                    `relative_path` TEXT NOT NULL,
+                    `state` TEXT NOT NULL,
+                    PRIMARY KEY(`id`)
+                )""".trimIndent()
+            )
+            db.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS `ux_assets_sha256` ON `assets` (`sha256`)"
+            )
+            db.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS `ux_assets_relative_path` ON `assets` (`relative_path`)"
+            )
+        }
+    }
 }
