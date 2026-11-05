@@ -34,6 +34,9 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.Assert.assertFalse
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.performSemanticsAction
 
 @RunWith(AndroidJUnit4::class)
 class EditorPenProductionIntegrationTest {
@@ -269,4 +272,148 @@ class EditorPenProductionIntegrationTest {
                 .envelopeJson,
         )
     }
+
+    @Test
+    fun leavingEditorDuringStrokeDoesNotPersistIncompleteInk() {
+        val (noteId, pageId) = createNote()
+
+        val editorVisible = mutableStateOf(true)
+        val openingNumber = mutableIntStateOf(0)
+
+        rule.setContent {
+            if (editorVisible.value) {
+                val session: NoteEditorSessionViewModel =
+                    viewModel(
+                        key = "edt09-navigation-${openingNumber.intValue}"
+                    )
+
+                NoteEditorScreen(
+                    noteId = noteId,
+                    noteRepository = RoomNoteRepository(database),
+                    documentRepository = RoomDocumentRepository(database),
+                    sessionViewModel = session,
+                    navigationBackRequests = 0,
+                    onBack = {
+                        editorVisible.value = false
+                    },
+                )
+            }
+        }
+
+        // Initial document is empty and fully saved.
+        awaitEditor(revision = 0L)
+
+        rule.onNodeWithText(
+            "Enable finger Pen writing"
+        ).performClick()
+
+        // Begin drawing but deliberately do not release.
+        rule.onNodeWithContentDescription(
+            viewportDescription
+        ).performTouchInput {
+            down(percentOffset(0.35f, 0.20f))
+            moveTo(percentOffset(0.50f, 0.30f))
+        }
+
+        rule.waitForIdle()
+
+        // Invoke the production Back button's semantic click.
+        //
+        // A finger is still pressed on the viewport. performClick()
+        // would attempt another DOWN for pointer 0 and fail.
+        //
+        // The semantics action invokes the same button callback
+        // without creating another touch gesture.
+        rule.onNodeWithText("Back")
+            .performSemanticsAction(SemanticsActions.OnClick)
+
+        rule.waitUntil(10_000L) {
+            rule.onAllNodesWithContentDescription(
+                viewportDescription
+            ).fetchSemanticsNodes().isEmpty()
+        }
+
+        rule.waitForIdle()
+
+        // An unfinished gesture must not become a Room edit.
+        val afterLeaving = runBlocking {
+            RoomDocumentRepository(database).load(noteId)
+        }
+
+        assertEquals(0L, afterLeaving.revision)
+        assertEquals(pageId, afterLeaving.pages.single().id)
+        assertTrue(afterLeaving.pages.single().elements.isEmpty())
+
+        // Re-enter the same note with a fresh editor session.
+        rule.runOnIdle {
+            openingNumber.intValue += 1
+            editorVisible.value = true
+        }
+
+        awaitEditor(revision = 0L)
+
+        assertFalse(
+            "Incomplete ink preview must not return after navigation",
+            savedBlueInkIsVisible(),
+        )
+
+// The finger from the original drawing gesture
+// is finally lifted after the editor has reopened.
+//
+// The old viewport was disposed, so this release
+// must not finish or persist the interrupted stroke.
+        rule.onNodeWithContentDescription(
+            viewportDescription
+        ).performTouchInput {
+            up()
+        }
+
+        rule.waitForIdle()
+
+        val afterLateRelease = runBlocking {
+            RoomDocumentRepository(database).load(noteId)
+        }
+
+        assertEquals(
+            "Late release must not advance document revision",
+            0L,
+            afterLateRelease.revision,
+        )
+
+        assertTrue(
+            "Late release must not insert a stroke",
+            afterLateRelease.pages.single().elements.isEmpty(),
+        )
+
+        // A fresh drawing after reopening must still work.
+        rule.onNodeWithText(
+            "Enable finger Pen writing"
+        ).performClick()
+
+        drawOneFingerStroke()
+
+        // Wait for the actual coordinator and Room commit.
+        awaitEditor(revision = 1L)
+
+        val afterFreshStroke = runBlocking {
+            RoomDocumentRepository(database).load(noteId)
+        }
+
+        assertEquals(1L, afterFreshStroke.revision)
+        assertEquals(pageId, afterFreshStroke.pages.single().id)
+        assertEquals(
+            1,
+            afterFreshStroke.pages.single().elements.size
+        )
+        assertEquals(
+            "stroke",
+            afterFreshStroke.pages.single().elements.single().kind
+        )
+
+        assertTrue(
+            "Fresh completed ink must render after saving",
+            savedBlueInkIsVisible(),
+        )
+    }
+
 }
