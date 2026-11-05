@@ -87,10 +87,12 @@ class RoomDocumentRepository(
             if (isPdfBackground(page.backgroundJson)) {
                 fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF asset deletion is not supported")
             }
+            rejectIndexedPageEdge(page.id)
             val elements = db.elementDao().listByPage(page.id)
             if (elements.any(::isImageContent)) {
                 fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image asset deletion is not supported")
             }
+            rejectIndexedElementEdges(elements)
             elements.forEach { check(db.elementDao().deleteById(it.id) == 1) }
             check(db.pageDao().deleteById(page.id) == 1)
             val remaining = db.pageDao().listByNote(noteId)
@@ -108,6 +110,7 @@ class RoomDocumentRepository(
             }
             CanonicalContentValidator.background(edit.backgroundJson)
             if (page.backgroundJson == edit.backgroundJson) false else {
+                rejectIndexedPageEdge(page.id)
                 check(db.pageDao().update(page.copy(backgroundJson = edit.backgroundJson, revision = revision)) == 1)
                 true
             }
@@ -117,6 +120,7 @@ class RoomDocumentRepository(
             val existing = elementsFor(page.id)
             val at = insertionAt(edit.at, existing.size)
             if (edit.envelopes.isEmpty()) false else {
+                rejectIndexedPageEdge(page.id)
                 val parsed = edit.envelopes.map { raw ->
                     val (id, kind) = CanonicalContentValidator.element(raw)
                     ElementEntity(id, page.id, 0, kind, raw, revision)
@@ -149,6 +153,7 @@ class RoomDocumentRepository(
             }
             uniqueIds(parsed.map { it.id })
             val changed = parsed.filter { it.elementJson != existing.getValue(it.id).elementJson }
+            rejectIndexedElementEdges(changed)
             changed.forEach { check(db.elementDao().update(it) == 1) }
             changed.isNotEmpty()
         }
@@ -163,6 +168,7 @@ class RoomDocumentRepository(
                 if (selected.any(::isImageContent)) {
                     fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image asset deletion is not supported")
                 }
+                rejectIndexedElementEdges(selected)
                 ids.forEach { check(db.elementDao().deleteById(it) == 1) }
                 val remaining = db.elementDao().listByPage(page.id)
                 setElementOrder(remaining, remaining.map { it.id }, revision)
@@ -194,6 +200,7 @@ class RoomDocumentRepository(
                 if (selected.any(::isImageContent)) {
                     fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image transfer requires asset management")
                 }
+                rejectIndexedElementEdges(selected)
                 val movingInRenderOrder = source.filter { it.id in ids.toSet() }
                 movingInRenderOrder.forEachIndexed { index, row ->
                     check(db.elementDao().update(row.copy(
@@ -209,6 +216,21 @@ class RoomDocumentRepository(
                 }
                 setElementOrder(db.elementDao().listByPage(to.id), finalTarget, revision)
                 true
+            }
+        }
+    }
+
+    /** A mismatched legacy index entry cannot be silently removed by an asset-free edit. */
+    private suspend fun rejectIndexedPageEdge(pageId: String) {
+        if (db.assetOwnershipDao().findPageReference(pageId) != null) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed page ownership requires asset-aware editing")
+        }
+    }
+
+    private suspend fun rejectIndexedElementEdges(rows: List<ElementEntity>) {
+        for (row in rows) {
+            if (db.assetOwnershipDao().findElementReference(row.id) != null) {
+                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed element ownership requires asset-aware editing")
             }
         }
     }

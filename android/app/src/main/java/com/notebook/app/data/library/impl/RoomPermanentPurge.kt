@@ -90,6 +90,9 @@ internal class RoomPermanentPurge(private val db: AppDatabase) {
                     !page.width.isFinite() || page.width <= 0.0 ||
                     !page.height.isFinite() || page.height <= 0.0 || page.revision > n.revision || page.revision < 0
                 ) fail(LibraryErrorCode.INVALID_INPUT, "Invalid stored page geometry or ordering")
+                if (db.assetOwnershipDao().findPageReference(page.id) != null) {
+                    fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed page ownership blocks permanent purge")
+                }
                 CanonicalContentValidator.background(page.backgroundJson)
                 identity.add("P|${page.id}|${page.noteId}|${page.orderIndex}|${page.width}|${page.height}|${page.revision}|${page.backgroundJson}")
                 pageCount++
@@ -97,6 +100,9 @@ internal class RoomPermanentPurge(private val db: AppDatabase) {
                     if (element.orderIndex != elementIndex.toLong() || element.pageId != page.id ||
                         element.revision > n.revision || element.revision < 0
                     ) fail(LibraryErrorCode.INVALID_INPUT, "Invalid stored element ordering or revision")
+                    if (db.assetOwnershipDao().findElementReference(element.id) != null) {
+                        fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed element ownership blocks permanent purge")
+                    }
                     val (canonicalId, kind) = CanonicalContentValidator.element(element.elementJson)
                     if (canonicalId != element.id || kind != element.kind) {
                         fail(LibraryErrorCode.INVALID_INPUT, "Stored element index disagrees with canonical content")

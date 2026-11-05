@@ -76,12 +76,18 @@ class RoomNoteContentTransactionAdapter(
         // or skipped. The outer transaction still protects against later IO/SQL errors.
         val generatedIds = mutableSetOf<String>()
         val copies = pages.map { page ->
+            if (db.assetOwnershipDao().findPageReference(page.id) != null) {
+                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed page ownership cannot be cloned yet")
+            }
             CanonicalContentValidator.page(InitialPageSpec(
                 page.width, page.height, page.backgroundJson,
             ))
             val elements = db.elementDao().listByPage(page.id)
             requireContiguous(elements.map { it.orderIndex }, "Source element")
             val copiedElements = elements.map { element ->
+                if (db.assetOwnershipDao().findElementReference(element.id) != null) {
+                    fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed element ownership cannot be cloned yet")
+                }
                 val (envelopeId, indexedKind) = CanonicalContentValidator.element(element.elementJson)
                 if (envelopeId != element.id || indexedKind != element.kind) {
                     fail(LibraryErrorCode.INVALID_INPUT, "Stored element and canonical JSON disagree")
