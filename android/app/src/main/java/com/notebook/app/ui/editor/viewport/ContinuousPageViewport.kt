@@ -52,7 +52,6 @@ import com.notebook.app.ui.editor.ink.EditorGestureOwnership
 import com.notebook.app.ui.editor.ink.EditorInkTool
 import kotlin.math.abs
 import kotlin.math.hypot
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.PointerInputChange
 import com.notebook.app.ui.editor.ink.EditorPenCapture
 import com.notebook.app.ui.editor.ink.EditorPenPoint
@@ -60,6 +59,7 @@ import com.notebook.app.ui.editor.ink.EditorPenPreview
 import androidx.compose.runtime.rememberUpdatedState
 import com.notebook.app.ui.editor.ink.EditorPenDocumentCodec
 import com.notebook.app.ui.editor.ink.EditorInkBrushPresets
+import com.notebook.app.ui.editor.ink.EditorInkPreviewCanvasRenderer
 
 /** Read-only snapshot for this checkpoint. Use page IDs/dimensions from DocumentRepository.load. */
 data class PageViewportItem(
@@ -785,70 +785,28 @@ fun ContinuousPageViewport(
                 }
             }
 
-            // EDT-09 2C-1: transient Pen preview.
-            // The camera remains frozen while this pointer owns drawing.
-            // These are screen-PX samples, not persisted document data.
             livePenPreview
                 ?.takeIf { it.pageId == page.id }
                 ?.let { preview ->
                     val toolAtStart = livePreviewTool
                         ?: return@let
 
-                    val brush = EditorInkBrushPresets.forTool(toolAtStart)
-
-                    val previewColor = Color(
-                        android.graphics.Color.parseColor(brush.colorHex)
-                    ).copy(
-                        alpha = brush.opacity.toFloat(),
+                    val brush = EditorInkBrushPresets.forTool(
+                        toolAtStart
                     )
 
-                    val previewWidthPx = (
-                        brush.widthDu *
-                            preview.startTransform.scalePxPerDu
-                        ).toFloat()
                     clipRect(
                         left = left,
                         top = top,
                         right = left + width,
                         bottom = top + height,
                     ) {
-                        val samples = preview.samples
-                        val penColor = Color(0xFF2255AA)
-                        val penWidth = (
-                            EditorPenDocumentCodec.PEN_WIDTH_DU *
-                                preview.startTransform.scalePxPerDu
-                            ).toFloat()
-
-                        if (samples.size == 1) {
-                            val point = samples.first()
-
-                            drawCircle(
-                                color = previewColor,
-                                radius = previewWidthPx / 2f,
-                                center = Offset(
-                                    point.xPx.toFloat(),
-                                    point.yPx.toFloat(),
-                                ),
+                        drawIntoCanvas { canvas ->
+                            EditorInkPreviewCanvasRenderer.draw(
+                                canvas = canvas.nativeCanvas,
+                                preview = preview,
+                                brush = brush,
                             )
-                        } else {
-                            for (index in 1 until samples.size) {
-                                val previous = samples[index - 1]
-                                val current = samples[index]
-
-                                drawLine(
-                                    color = previewColor,
-                                    start = Offset(
-                                        previous.xPx.toFloat(),
-                                        previous.yPx.toFloat(),
-                                    ),
-                                    end = Offset(
-                                        current.xPx.toFloat(),
-                                        current.yPx.toFloat(),
-                                    ),
-                                    strokeWidth = previewWidthPx,
-                                    cap = StrokeCap.Round,
-                                )
-                            }
                         }
                     }
                 }
