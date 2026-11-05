@@ -246,4 +246,57 @@ class EditorEraserCanonicalHitTestTest {
             eraserRadiusPageDu = Double.NaN,
         )
     }
+
+    @Test
+    fun intersectionOnlyOutsidePageIsNotAHitCandidate() {
+        // Canonical stroke is translated completely
+        // outside the left edge of its owning page.
+        val outside = strokeEnvelope(
+            tx = -150.0,
+            ty = 100.0,
+        )
+
+        val result = scan(
+            page(envelope = outside),
+            listOf(
+                p(-100.0, 90.0),
+                p(-100.0, 110.0),
+            ),
+        )
+
+        assertTrue(result.hitElementIds.isEmpty())
+        assertTrue(
+            result.unresolvedPageClipElementIds.isEmpty()
+        )
+    }
+
+    @Test
+    fun uncertainPageClippingIsReportedSeparately() {
+        // A portion of the stroke enters the page,
+        // but the eraser's obvious intersection
+        // is outside it.
+        val edgeStroke = strokeEnvelope(
+            tx = -99.5,
+            ty = 50.0,
+        )
+
+        val result = scan(
+            page(envelope = edgeStroke),
+            listOf(
+                p(-50.0, 50.0),
+                p(10.0, 70.0),
+            ),
+        )
+
+        assertTrue(result.hitElementIds.isEmpty())
+
+        assertEquals(
+            listOf(strokeId),
+            result.unresolvedPageClipElementIds,
+        )
+
+        assertTrue(result.hasUnresolvedPageClipping)
+        assertFalse(result.hasUnsupportedTransforms)
+    }
+
 }

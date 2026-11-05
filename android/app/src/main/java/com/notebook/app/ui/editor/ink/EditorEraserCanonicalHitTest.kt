@@ -9,6 +9,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlin.math.hypot
 
 /**
  * Read-only hit-testing against existing canonical strokes.
@@ -27,9 +28,12 @@ internal object EditorEraserCanonicalHitTest {
         val hitElementIds: List<String>,
         val lockedElementIds: List<String>,
         val unsupportedTransformElementIds: List<String>,
+        val unresolvedPageClipElementIds: List<String> = emptyList(),
     ) {
         val hasUnsupportedTransforms: Boolean
             get() = unsupportedTransformElementIds.isNotEmpty()
+        val hasUnresolvedPageClipping: Boolean
+            get() = unresolvedPageClipElementIds.isNotEmpty()
     }
 
     fun scan(
@@ -85,6 +89,7 @@ internal object EditorEraserCanonicalHitTest {
         val hits = mutableListOf<String>()
         val locked = mutableListOf<String>()
         val unsupported = mutableListOf<String>()
+        val unresolvedPageClip = mutableListOf<String>()
 
         for (stroke in strokes) {
             require(stroke.pageId == page.id) {
@@ -152,7 +157,38 @@ internal object EditorEraserCanonicalHitTest {
                 )
             ) {
                 Result.HIT -> {
-                    hits += stroke.elementId
+                    // 1B-1 has already established that this
+                    // transform is a supported similarity.
+                    val scale = hypot(affine.a, affine.b)
+
+                    val strokeRadiusPageDu =
+                        stroke.brush.widthDu * scale / 2.0
+
+                    val strokePointsPageDu = points.map(affine::map)
+
+                    when (
+                        EditorEraserPageClipping.classify(
+                            strokePointsPageDu = strokePointsPageDu,
+                            strokeRadiusPageDu = strokeRadiusPageDu,
+                            eraserPointsPageDu = eraserPointsPageDu,
+                            eraserRadiusPageDu = eraserRadiusPageDu,
+                            pageWidthDu = page.width,
+                            pageHeightDu = page.height,
+                        )
+                    ) {
+                        EditorEraserPageClipping.Verdict
+                            .CONFIRMED_VISIBLE_HIT -> {
+                            hits += stroke.elementId
+                        }
+
+                        EditorEraserPageClipping.Verdict
+                            .NO_VISIBLE_HIT -> Unit
+
+                        EditorEraserPageClipping.Verdict
+                            .UNRESOLVED_BOUNDARY -> {
+                            unresolvedPageClip += stroke.elementId
+                        }
+                    }
                 }
 
                 Result.MISS -> Unit
@@ -167,6 +203,7 @@ internal object EditorEraserCanonicalHitTest {
             hitElementIds = hits,
             lockedElementIds = locked,
             unsupportedTransformElementIds = unsupported,
+            unresolvedPageClipElementIds = unresolvedPageClip,
         )
     }
 }
