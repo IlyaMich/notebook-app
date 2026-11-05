@@ -44,6 +44,10 @@ interface NoteDao {
     @Query("DELETE FROM notes WHERE id = :id")
     suspend fun deleteById(id: String): Int
 
+    /** Read-only enumeration includes active and trashed notes. */
+    @Query("SELECT * FROM notes ORDER BY id ASC LIMIT :limit")
+    suspend fun listForAssetOwnerInventory(limit: Int): List<NoteEntity>
+
     @Query("SELECT COUNT(*) FROM notes")
     suspend fun countAll(): Int
 }
