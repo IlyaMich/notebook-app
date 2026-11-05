@@ -273,16 +273,93 @@ class NoteAutosaveEraserSessionTest {
     }
 
     @Test
-    fun previouslyCancelledSessionNeverHangsOrCommitsEraser() = runBlocking {
+    fun previouslyCancelledSessionRejectsRemovalWithoutChangingSaveState() = runBlocking {
         val scope = newScope()
         scope.cancel()
         val repository = newRepository()
         val coordinator = NoteAutosaveCoordinator(noteId, repository, scope, 7L)
         val outcome = awaitResult(coordinator.submitWholeStrokeRemoval(plan()))
-        assertTrue(outcome is EraserSessionCommitResult.Unconfirmed)
-        assertEquals(SavePhase.FAILED, coordinator.state.value.phase)
+        assertTrue(outcome is EraserSessionCommitResult.Rejected)
+        assertEquals(SavePhase.SAVED, coordinator.state.value.phase)
+        assertEquals(0, coordinator.state.value.pendingCommandCount)
         assertEquals(0, repository.guardedCalls)
+        assertEquals(listOf(a, b, c), repository.rows.map { it.id })
         assertFalse(coordinator.eraserHistory.value.canUndo)
+    }
+
+    @Test
+    fun cancellationDuringSuspendedGuardedCommitCannotClaimSuccessOrRunLater() = runBlocking {
+        val scope = newScope()
+        val repository = newRepository()
+        val gate = CompletableDeferred<Unit>()
+        repository.commitGate = gate
+        repository.commitEntered = CompletableDeferred()
+        val coordinator = NoteAutosaveCoordinator(noteId, repository, scope, 7L)
+        val result = coordinator.submitWholeStrokeRemoval(plan())
+        withTimeout(5_000) { repository.commitEntered!!.await() }
+        scope.cancel()
+        assertTrue(awaitResult(result) is EraserSessionCommitResult.Unconfirmed)
+        assertEquals(SavePhase.FAILED, coordinator.state.value.phase)
+        assertFalse(coordinator.eraserHistory.value.canUndo)
+        assertEquals(listOf(a, b, c), repository.rows.map { it.id })
+        gate.complete(Unit) // Releasing a cancelled suspended commit cannot execute deletion.
+        assertEquals(7L, repository.revision)
+        assertEquals(listOf(a, b, c), repository.rows.map { it.id })
+        assertEquals(SaveRetryResult.RECONCILIATION_REQUIRED, coordinator.retry())
+        assertEquals(1, repository.guardedCalls)
+    }
+
+    @Test
+    fun cancelledSessionCannotSubmitUndoOrRedoAfterPreviouslyConfirmedCommit() = runBlocking {
+        val scope = newScope()
+        val repository = newRepository()
+        val coordinator = NoteAutosaveCoordinator(noteId, repository, scope, 7L)
+        assertEquals(EraserSessionCommitResult.Committed(8L),
+            awaitResult(coordinator.submitWholeStrokeRemoval(plan())))
+        scope.cancel()
+        assertTrue(awaitResult(coordinator.undoWholeStroke()) is EraserSessionCommitResult.Rejected)
+        assertTrue(awaitResult(coordinator.redoWholeStroke()) is EraserSessionCommitResult.Rejected)
+        assertEquals(listOf(b), repository.rows.map { it.id })
+        assertEquals(8L, repository.revision)
+        assertEquals(1, repository.guardedCalls)
+    }
+
+    @Test
+    fun lostAcknowledgementRequiresNewSessionLoadAndNeverReplaysOldRemoval() = runBlocking {
+        val originalScope = newScope()
+        val repository = newRepository()
+        repository.failAfterGuardedCommit = true
+        val oldCoordinator = NoteAutosaveCoordinator(noteId, repository, originalScope, 7L)
+        assertTrue(awaitResult(oldCoordinator.submitWholeStrokeRemoval(plan())) is EraserSessionCommitResult.Unconfirmed)
+        assertEquals(SaveRetryResult.RECONCILIATION_REQUIRED, oldCoordinator.retry())
+        assertEquals(SavePhase.FAILED, oldCoordinator.state.value.phase)
+        originalScope.cancel()
+        val reloaded = repository.load(noteId)
+        assertEquals(8L, reloaded.revision)
+        assertEquals(listOf(b), reloaded.pages.single().elements.map { it.id })
+        val replacementScope = newScope()
+        try {
+            val replacement = NoteAutosaveCoordinator(noteId, repository, replacementScope, reloaded.revision)
+            assertEquals(SavePhase.SAVED, replacement.state.value.phase)
+            assertEquals(8L, replacement.state.value.committedRevision)
+            assertEquals(0, replacement.eraserHistory.value.undoDepth)
+            assertTrue(awaitResult(replacement.undoWholeStroke()) is EraserSessionCommitResult.Rejected)
+            assertEquals(1, repository.guardedCalls)
+        } finally { replacementScope.cancel() }
+    }
+
+    @Test
+    fun cancelledScopeNeverRetriesEvenIfStorageRevisionIsUnchanged() = runBlocking {
+        val scope = newScope()
+        val repository = newRepository()
+        repository.failBeforeGuardedCommit = true
+        val coordinator = NoteAutosaveCoordinator(noteId, repository, scope, 7L)
+        assertTrue(awaitResult(coordinator.submitWholeStrokeRemoval(plan())) is EraserSessionCommitResult.Unconfirmed)
+        assertEquals(7L, repository.revision)
+        scope.cancel()
+        assertEquals(SaveRetryResult.RECONCILIATION_REQUIRED, coordinator.retry())
+        assertEquals(1, repository.guardedCalls)
+        assertEquals(listOf(a, b, c), repository.rows.map { it.id })
     }
 
     @Test

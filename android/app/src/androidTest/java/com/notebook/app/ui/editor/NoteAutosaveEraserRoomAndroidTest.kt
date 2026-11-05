@@ -5,6 +5,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.notebook.app.data.content.impl.RoomDocumentRepository
 import com.notebook.app.data.content.model.DocumentEdit
+import com.notebook.app.data.content.model.DocumentCommit
+import com.notebook.app.data.content.model.StoredNoteContent
+import com.notebook.app.data.content.repository.DocumentRepository
 import com.notebook.app.data.local.AppDatabase
 import com.notebook.app.data.local.AppDatabaseProvider
 import com.notebook.app.data.local.entity.NoteEntity
@@ -108,6 +111,74 @@ class NoteAutosaveEraserRoomAndroidTest {
             assertFalse(coordinator.eraserHistory.value.canUndo)
             assertEquals(SavePhase.FAILED, coordinator.state.value.phase)
         } finally { scope.cancel() }
+    }
+
+    @Test fun alreadyClosedSessionDoesNotCommitRemoval() = runBlocking {
+        val (noteId, pageId) = fixture()
+        val first = id(); val second = id()
+        repo.commit(noteId, DocumentEdit.InsertElements(pageId, listOf(stroke(first), stroke(second))))
+        val snapshot = repo.load(noteId)
+        val plan = requireNotNull(EditorEraserWholeStrokeRemovalPlanner.plan(
+            snapshot, pageId, snapshot.revision, snapshot.pages.single().revision, listOf(first),
+        ))
+        val endedScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        endedScope.cancel()
+        val coordinator = NoteAutosaveCoordinator(noteId, repo, endedScope, snapshot.revision)
+        val result = withTimeout(10_000) { coordinator.submitWholeStrokeRemoval(plan).await() }
+        assertTrue(result is EraserSessionCommitResult.Rejected)
+        assertEquals(SavePhase.SAVED, coordinator.state.value.phase)
+        assertEquals(0, coordinator.state.value.pendingCommandCount)
+        assertEquals(snapshot, repo.load(noteId))
+        assertFalse(coordinator.eraserHistory.value.canUndo)
+    }
+
+    @Test fun lostRoomAcknowledgementRequiresReloadWithoutReplayingRemoval() = runBlocking {
+        val (noteId, pageId) = fixture()
+        val first = id(); val second = id()
+        repo.commit(noteId, DocumentEdit.InsertElements(pageId, listOf(stroke(first), stroke(second))))
+        val snapshot = repo.load(noteId)
+        val plan = requireNotNull(EditorEraserWholeStrokeRemovalPlanner.plan(
+            snapshot, pageId, snapshot.revision, snapshot.pages.single().revision, listOf(first),
+        ))
+        val productionRepository = repo
+        val lostAckRepository = object : DocumentRepository {
+            var guardedCalls = 0
+            override suspend fun load(noteId: String): StoredNoteContent = productionRepository.load(noteId)
+            override suspend fun commit(noteId: String, edit: DocumentEdit): DocumentCommit =
+                productionRepository.commit(noteId, edit)
+            override suspend fun commitIfRevision(
+                noteId: String, expectedRevision: Long, edit: DocumentEdit,
+            ): DocumentCommit {
+                guardedCalls++
+                productionRepository.commitIfRevision(noteId, expectedRevision, edit)
+                throw IllegalStateException("Simulated lost Room acknowledgement")
+            }
+        }
+        val previousScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val previous = NoteAutosaveCoordinator(noteId, lostAckRepository, previousScope, snapshot.revision)
+            val outcome = withTimeout(10_000) { previous.submitWholeStrokeRemoval(plan).await() }
+            assertTrue(outcome is EraserSessionCommitResult.Unconfirmed)
+            assertEquals(SavePhase.FAILED, previous.state.value.phase)
+            assertEquals(SaveRetryResult.RECONCILIATION_REQUIRED, previous.retry())
+            assertEquals(1, lostAckRepository.guardedCalls)
+        } finally { previousScope.cancel() }
+
+        // Simulate leaving the editor and opening a new session from durable Room state.
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, databaseName)
+        repo = RoomDocumentRepository(db)
+        val reloaded = repo.load(noteId)
+        assertEquals(snapshot.revision + 1, reloaded.revision)
+        assertEquals(listOf(second), reloaded.pages.single().elements.map { it.id })
+        val replacementScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val replacement = NoteAutosaveCoordinator(noteId, repo, replacementScope, reloaded.revision)
+            assertEquals(SavePhase.SAVED, replacement.state.value.phase)
+            assertEquals(0, replacement.eraserHistory.value.undoDepth)
+            assertTrue(withTimeout(10_000) { replacement.undoWholeStroke().await() } is EraserSessionCommitResult.Rejected)
+            assertEquals(reloaded, repo.load(noteId))
+        } finally { replacementScope.cancel() }
     }
 
     private suspend fun fixture(): Pair<String, String> {

@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import java.util.ArrayDeque
 
@@ -154,7 +155,11 @@ class NoteAutosaveCoordinator(
         )
         val acknowledgement = CompletableDeferred<EraserSessionCommitResult>()
         val accepted = synchronized(lock) {
-            if (!idleForGuardedEdit()) {
+            if (!scope.isActive) {
+                // An editor that has already ended must not accept new destructive work.
+                acknowledgement.complete(EraserSessionCommitResult.Rejected("Editor session is closed"))
+                false
+            } else if (!idleForGuardedEdit()) {
                 acknowledgement.complete(EraserSessionCommitResult.Rejected("Autosave is not idle"))
                 false
             } else if (tracker.state.committedRevision != plan.expectedNoteRevision) {
@@ -184,7 +189,10 @@ class NoteAutosaveCoordinator(
         val acknowledgement = CompletableDeferred<EraserSessionCommitResult>()
         val accepted = synchronized(lock) {
             val entry = if (undo) undoStack.lastOrNull() else redoStack.lastOrNull()
-            if (!idleForGuardedEdit() || entry == null) {
+            if (!scope.isActive) {
+                acknowledgement.complete(EraserSessionCommitResult.Rejected("Editor session is closed"))
+                false
+            } else if (!idleForGuardedEdit() || entry == null) {
                 acknowledgement.complete(EraserSessionCommitResult.Rejected("No available eraser ${if (undo) "undo" else "redo"}"))
                 false
             } else {
@@ -205,7 +213,7 @@ class NoteAutosaveCoordinator(
 
     /** Called with [lock] held. */
     private fun idleForGuardedEdit(): Boolean =
-        !workerRunning && !needsReconciliation && pending.isEmpty() &&
+        scope.isActive && !workerRunning && !needsReconciliation && pending.isEmpty() &&
             tracker.state.phase == SavePhase.SAVED
 
     /** Called with [lock] held. */
@@ -237,6 +245,9 @@ class NoteAutosaveCoordinator(
                 }
                 tracker.state.committedRevision
             }
+            // A cancelled ViewModel scope cannot own a retry. Require a fresh
+            // editor session and a freshly loaded snapshot instead.
+            if (!scope.isActive) return SaveRetryResult.RECONCILIATION_REQUIRED
             val actualRevision = try {
                 repository.load(noteId).revision
             } catch (exception: CancellationException) {
@@ -245,7 +256,7 @@ class NoteAutosaveCoordinator(
                 return SaveRetryResult.RECONCILIATION_REQUIRED
             }
             val startWorker = synchronized(lock) {
-                if (workerRunning || !needsReconciliation) {
+                if (workerRunning || !needsReconciliation || !scope.isActive) {
                     false
                 } else if (actualRevision != expectedRevision ||
                     tracker.state.committedRevision != expectedRevision) {
