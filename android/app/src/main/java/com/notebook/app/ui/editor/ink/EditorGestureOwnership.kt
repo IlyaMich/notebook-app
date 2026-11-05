@@ -177,6 +177,17 @@ internal class EditorGestureOwnership {
     }
 
     /**
+     * True only for a finger that explicitly acquired navigation
+     * ownership on pointer-down or through finger-writing takeover.
+     *
+     * Contacts rejected during stylus drawing are excluded, even
+     * when some other finger is allowed to navigate.
+     */
+    fun isNavigationPointer(pointerId: Long): Boolean =
+        pointerId in navigationPointers &&
+            contacts[pointerId] == EditorContact.FINGER
+
+    /**
      * Navigation is suspended while a stroke is active.
      * The future Compose adapter owns pan/zoom calculations.
      */

@@ -631,12 +631,16 @@ fun ContinuousPageViewport(
                                     }
                                 }
 
-                            // Only pressed finger contacts participate in
-                            // navigation. Stylus input never changes the camera.
-                            val movingFingers = event.changes.filter {
-                                it.type == PointerType.Touch &&
-                                    it.pressed &&
-                                    it.previousPressed
+                            // Only fingers explicitly granted navigation ownership
+                            // may participate in pan/zoom calculations.
+                            //
+                            // A finger that landed during stylus drawing must not
+                            // influence the camera after the stylus releases.
+                            val movingFingers = event.changes.filter { change ->
+                                change.type == PointerType.Touch &&
+                                    change.pressed &&
+                                    change.previousPressed &&
+                                    owner.isNavigationPointer(change.id.value)
                             }
 
                             if (

@@ -291,4 +291,121 @@ class EditorGestureOwnershipTest {
         // Duplicate release is ignored.
         assertTrue(owner.onUp(1).isEmpty())
     }
+
+    @Test
+    fun palmCannotParticipateInNavigationAfterStylusRelease() {
+        // Finger 1 begins navigation.
+        down(1, EditorContact.FINGER)
+
+        assertTrue(owner.isNavigationPointer(1))
+
+        // Stylus starts a drawing gesture.
+        down(2, EditorContact.STYLUS)
+
+        assertFalse(owner.canNavigate())
+
+        // Finger 3 lands while the stylus is drawing.
+        down(3, EditorContact.FINGER, count = 2)
+
+        assertFalse(owner.isNavigationPointer(3))
+
+        // Stylus releases.
+        owner.onUp(2)
+
+        // Navigation can resume through finger 1 only.
+        assertTrue(owner.canNavigate())
+        assertTrue(owner.isNavigationPointer(1))
+        assertFalse(owner.isNavigationPointer(3))
+
+        // Original navigation finger releases.
+        owner.onUp(1)
+
+        // Palm contact cannot take over.
+        assertFalse(owner.canNavigate())
+        assertFalse(owner.isNavigationPointer(3))
+
+        owner.onUp(3)
+    }
+
+    @Test
+    fun fingerWritingTakeoverRegistersBothNavigationPointers() {
+        // Finger 1 begins writing.
+        val started = down(
+            1,
+            EditorContact.FINGER,
+            mode = EditorFingerMode.WRITE,
+        )
+
+        assertTrue(
+            started.single() is
+                EditorGestureOwnership.Effect.Started
+        )
+
+        assertFalse(owner.isNavigationPointer(1))
+
+        // Second finger cancels writing and transfers
+        // both fingers to navigation.
+        val effects = down(
+            2,
+            EditorContact.FINGER,
+            mode = EditorFingerMode.WRITE,
+            count = 2,
+        )
+
+        assertTrue(
+            effects.single() is
+                EditorGestureOwnership.Effect.Cancelled
+        )
+
+        assertTrue(owner.canNavigate())
+        assertTrue(owner.isNavigationPointer(1))
+        assertTrue(owner.isNavigationPointer(2))
+
+        // Releasing one finger preserves navigation.
+        owner.onUp(2)
+
+        assertTrue(owner.canNavigate())
+        assertTrue(owner.isNavigationPointer(1))
+        assertFalse(owner.isNavigationPointer(2))
+
+        // Releasing the final finger ends navigation.
+        owner.onUp(1)
+
+        assertFalse(owner.canNavigate())
+    }
+
+    @Test
+    fun cancelledNavigationCannotResumeWithoutFreshDown() {
+        down(1, EditorContact.FINGER)
+        down(
+            2,
+            EditorContact.FINGER,
+            count = 2,
+        )
+
+        assertTrue(owner.isNavigationPointer(1))
+        assertTrue(owner.isNavigationPointer(2))
+
+        // Platform cancellation clears every contact.
+        assertTrue(owner.cancelAll().isEmpty())
+
+        assertFalse(owner.canNavigate())
+        assertFalse(owner.isNavigationPointer(1))
+        assertFalse(owner.isNavigationPointer(2))
+
+        // Late releases cannot restore navigation.
+        assertTrue(owner.onUp(1).isEmpty())
+        assertTrue(owner.onUp(2).isEmpty())
+
+        assertFalse(owner.canNavigate())
+
+        // Only a fresh pointer-down can acquire ownership.
+        down(3, EditorContact.FINGER)
+
+        assertTrue(owner.canNavigate())
+        assertTrue(owner.isNavigationPointer(3))
+
+        owner.onUp(3)
+        assertFalse(owner.canNavigate())
+    }
 }
