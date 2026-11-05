@@ -25,6 +25,9 @@ interface PageDao {
     @Query("SELECT * FROM pages WHERE note_id = :noteId ORDER BY order_index ASC, id ASC")
     suspend fun listByNote(noteId: String): List<PageEntity>
 
+    @Query("SELECT COUNT(*) FROM pages")
+    suspend fun countAll(): Int
+
     @Query("SELECT COUNT(*) FROM pages WHERE note_id = :noteId")
     suspend fun countByNote(noteId: String): Int
 }

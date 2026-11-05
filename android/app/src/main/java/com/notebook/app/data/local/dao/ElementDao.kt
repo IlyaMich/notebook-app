@@ -25,6 +25,9 @@ interface ElementDao {
     @Query("SELECT * FROM elements WHERE page_id = :pageId ORDER BY order_index ASC, id ASC")
     suspend fun listByPage(pageId: String): List<ElementEntity>
 
+    @Query("SELECT COUNT(*) FROM elements")
+    suspend fun countAll(): Int
+
     @Query("SELECT COUNT(*) FROM elements WHERE page_id = :pageId")
     suspend fun countByPage(pageId: String): Int
 }
