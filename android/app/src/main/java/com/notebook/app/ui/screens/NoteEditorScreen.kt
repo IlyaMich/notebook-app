@@ -28,6 +28,7 @@ import kotlinx.coroutines.CancellationException
 import com.notebook.app.ui.editor.viewport.ContinuousPageViewport
 import com.notebook.app.ui.editor.viewport.toViewportSnapshot
 import androidx.compose.runtime.saveable.rememberSaveable
+import com.notebook.app.ui.editor.ink.EditorInkTool
 
 /**
  * STO-06 vertical slice.
@@ -71,6 +72,9 @@ fun NoteEditorScreen(
     }
     var fingerWritingPreview by rememberSaveable(noteId) {
         mutableStateOf(false)
+    }
+    var selectedTool by rememberSaveable(noteId) {
+        mutableStateOf(EditorInkTool.PEN)
     }
     var penInputError by remember(noteId) {
         mutableStateOf<String?>(null)
@@ -278,9 +282,31 @@ fun NoteEditorScreen(
                     .padding(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                EditorInkTool.entries.forEach { tool ->
+                    val label = when (tool) {
+                        EditorInkTool.PEN -> "Pen"
+                        EditorInkTool.PENCIL -> "Pencil"
+                        EditorInkTool.HIGHLIGHTER -> "Highlighter"
+                    }
+
+                    FilterChip(
+                        selected = selectedTool == tool,
+                        onClick = {
+                            selectedTool = tool
+                        },
+                        label = {
+                            Text(label)
+                        },
+                    )
+                }
+
+                // The remaining editor tools are not implemented yet.
                 listOf(
-                    "Pen", "Pencil", "Highlighter",
-                    "Eraser", "Lasso", "Shapes", "Text", "Image",
+                    "Eraser",
+                    "Lasso",
+                    "Shapes",
+                    "Text",
+                    "Image",
                 ).forEach { tool ->
                     Surface(
                         shape = MaterialTheme.shapes.small,
@@ -292,6 +318,7 @@ fun NoteEditorScreen(
                         )
                     }
                 }
+
             }
             TextButton(
                 onClick = {
@@ -511,23 +538,21 @@ fun NoteEditorScreen(
                         storedPages = viewportSnapshot.storedPages,
                         documentKey = noteId,
                         fingerWritingPreview = fingerWritingPreview,
+                        selectedTool = selectedTool,
                         onPenStrokeCompleted = { pageId, envelopeJson ->
+                            // Keep the existing 2C-2 autosave callback unchanged.
                             val activeCoordinator = coordinator
 
                             if (activeCoordinator == null) {
                                 penInputError =
-                                    "Cannot save Pen stroke: editor session unavailable"
+                                    "Cannot save stroke: editor session unavailable"
                             } else {
-                                // One completed stroke = one document edit.
-                                // Room writes, revision updates, failure tracking
-                                // and retries remain owned by the coordinator.
                                 activeCoordinator.enqueue(
                                     DocumentEdit.InsertElements(
                                         pageId = pageId,
                                         envelopes = listOf(envelopeJson),
                                     )
                                 )
-
                                 penInputError = null
                             }
                         },
@@ -538,7 +563,6 @@ fun NoteEditorScreen(
                             .fillMaxWidth()
                             .weight(1f),
                     )
-
                 }
             }
         }

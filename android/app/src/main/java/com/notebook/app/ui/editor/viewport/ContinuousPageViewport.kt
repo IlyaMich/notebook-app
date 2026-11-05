@@ -59,6 +59,7 @@ import com.notebook.app.ui.editor.ink.EditorPenPoint
 import com.notebook.app.ui.editor.ink.EditorPenPreview
 import androidx.compose.runtime.rememberUpdatedState
 import com.notebook.app.ui.editor.ink.EditorPenDocumentCodec
+import com.notebook.app.ui.editor.ink.EditorInkBrushPresets
 
 /** Read-only snapshot for this checkpoint. Use page IDs/dimensions from DocumentRepository.load. */
 data class PageViewportItem(
@@ -110,6 +111,7 @@ fun ContinuousPageViewport(
     documentKey: String = pages.firstOrNull()?.id.orEmpty(),
     storedPages: Map<String, StoredPage> = emptyMap(),
     fingerWritingPreview: Boolean = false,
+    selectedTool: EditorInkTool = EditorInkTool.PEN,
     onPenStrokeCompleted: (String, String) -> Unit = { _, _ -> },
     onPenStrokeError: (String) -> Unit = {},
 ) {
@@ -170,6 +172,9 @@ fun ContinuousPageViewport(
     var selectedPageId by remember(documentKey) { mutableStateOf<String?>(null) }
     var livePenPreview by remember(documentKey) {
         mutableStateOf<EditorPenPreview?>(null)
+    }
+    var livePreviewTool by remember(documentKey) {
+        mutableStateOf<EditorInkTool?>(null)
     }
     // remember survives only recomposition, not a rotation that recreates the Activity.
     // Save a minimal, note-keyed page-local bookmark that can be rebuilt for any screen size.
@@ -317,11 +322,10 @@ fun ContinuousPageViewport(
                 canvasSize,
                 gutterPx,
                 fingerWritingPreview,
+                selectedTool,
             ) {
                 val owner = EditorGestureOwnership()
                 val capture = EditorPenCapture()
-
-                val selectedTool = EditorInkTool.PEN
 
                 val fingerMode = if (fingerWritingPreview) {
                     EditorFingerMode.WRITE
@@ -358,9 +362,11 @@ fun ContinuousPageViewport(
                                 if (started != null) {
                                     drawingPointerId = started.pointerId
                                     livePenPreview = started
+                                    livePreviewTool = selectedTool
                                 } else {
                                     drawingPointerId = null
                                     livePenPreview = null
+                                    livePreviewTool = null
                                 }
                             }
 
@@ -376,6 +382,7 @@ fun ContinuousPageViewport(
 
                                     drawingPointerId = null
                                     livePenPreview = null
+                                    livePreviewTool = null
 
                                     if (completed == null) {
                                         latestOnPenStrokeError(
@@ -389,6 +396,7 @@ fun ContinuousPageViewport(
                                             EditorPenDocumentCodec.encode(
                                                 completed = completed,
                                                 layout = layout,
+                                                tool = selectedTool,
                                             )
                                         }
 
@@ -416,6 +424,7 @@ fun ContinuousPageViewport(
                                 capture.cancel()
                                 drawingPointerId = null
                                 livePenPreview = null
+                                livePreviewTool = null
                             }
                         }
                     }
@@ -733,6 +742,7 @@ fun ContinuousPageViewport(
                     capture.cancel()
                     drawingPointerId = null
                     livePenPreview = null
+                    livePreviewTool = null
                 }
             },
     ) {
@@ -781,6 +791,21 @@ fun ContinuousPageViewport(
             livePenPreview
                 ?.takeIf { it.pageId == page.id }
                 ?.let { preview ->
+                    val toolAtStart = livePreviewTool
+                        ?: return@let
+
+                    val brush = EditorInkBrushPresets.forTool(toolAtStart)
+
+                    val previewColor = Color(
+                        android.graphics.Color.parseColor(brush.colorHex)
+                    ).copy(
+                        alpha = brush.opacity.toFloat(),
+                    )
+
+                    val previewWidthPx = (
+                        brush.widthDu *
+                            preview.startTransform.scalePxPerDu
+                        ).toFloat()
                     clipRect(
                         left = left,
                         top = top,
@@ -798,8 +823,8 @@ fun ContinuousPageViewport(
                             val point = samples.first()
 
                             drawCircle(
-                                color = penColor,
-                                radius = penWidth / 2f,
+                                color = previewColor,
+                                radius = previewWidthPx / 2f,
                                 center = Offset(
                                     point.xPx.toFloat(),
                                     point.yPx.toFloat(),
@@ -811,7 +836,7 @@ fun ContinuousPageViewport(
                                 val current = samples[index]
 
                                 drawLine(
-                                    color = penColor,
+                                    color = previewColor,
                                     start = Offset(
                                         previous.xPx.toFloat(),
                                         previous.yPx.toFloat(),
@@ -820,7 +845,7 @@ fun ContinuousPageViewport(
                                         current.xPx.toFloat(),
                                         current.yPx.toFloat(),
                                     ),
-                                    strokeWidth = penWidth,
+                                    strokeWidth = previewWidthPx,
                                     cap = StrokeCap.Round,
                                 )
                             }

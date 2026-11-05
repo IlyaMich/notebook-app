@@ -1,7 +1,7 @@
 
 package com.notebook.app.ui.editor.ink
 
-internal enum class EditorInkTool {
+enum class EditorInkTool {
     PEN,
     PENCIL,
     HIGHLIGHTER,
