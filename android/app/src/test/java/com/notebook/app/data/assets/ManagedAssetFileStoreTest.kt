@@ -12,6 +12,10 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 class ManagedAssetFileStoreTest {
     @get:Rule val root = TemporaryFolder()
@@ -140,6 +144,58 @@ class ManagedAssetFileStoreTest {
         val retry = ManagedAssetFileStore(root.root, directorySync = {})
             .stageAndFinalize(ByteArrayInputStream(png), "image/png")
         assertEquals(requireNotNull(reserved), File(root.root, retry.relativePath))
+    }
+
+    @Test fun anotherStoreCannotAcceptBytesBeforeFirstPublisherFinishes() {
+        val reachedLastChunk = CountDownLatch(1)
+        val allowFirstToFail = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val firstStore = ManagedAssetFileStore(
+                root.root, directorySync = {}, afterPublishBytesWritten = {
+                    reachedLastChunk.countDown()
+                    if (!allowFirstToFail.await(5, TimeUnit.SECONDS)) {
+                        throw IOException("Timed out waiting to simulate failure")
+                    }
+                    throw IOException("Simulated failure after copying complete bytes")
+                },
+            )
+            val secondStore = ManagedAssetFileStore(root.root, directorySync = {})
+            val first = executor.submit<Throwable?> {
+                runCatching { firstStore.stageAndFinalize(ByteArrayInputStream(png), "image/png") }
+                    .exceptionOrNull()
+            }
+            assertTrue("First writer did not reach last chunk", reachedLastChunk.await(5, TimeUnit.SECONDS))
+            val secondStarted = CountDownLatch(1)
+            val second = executor.submit<ManagedAssetFileStore.FinalizedFile> {
+                secondStarted.countDown()
+                secondStore.stageAndFinalize(ByteArrayInputStream(png), "image/png")
+            }
+            assertTrue(secondStarted.await(5, TimeUnit.SECONDS))
+            try {
+                second.get(250, TimeUnit.MILLISECONDS)
+                fail("Second importer accepted still-uncommitted bytes")
+            } catch (_: TimeoutException) {
+                // Expected: second store cannot publish/reuse while first lock is held.
+            }
+            allowFirstToFail.countDown()
+            assertTrue(first.get(5, TimeUnit.SECONDS) is IOException)
+            val finalized = second.get(5, TimeUnit.SECONDS)
+            assertArrayEquals(png, File(root.root, finalized.relativePath).readBytes())
+        } finally {
+            allowFirstToFail.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test fun duplicateReuseAlsoSyncsTheExistingFinalParent() {
+        val first = ManagedAssetFileStore(root.root, directorySync = {})
+            .stageAndFinalize(ByteArrayInputStream(png), "image/png")
+        val synced = mutableListOf<File>()
+        val second = ManagedAssetFileStore(root.root, directorySync = { synced.add(it) })
+            .stageAndFinalize(ByteArrayInputStream(png), "image/png")
+        assertEquals(first, second)
+        assertEquals(File(root.root, first.relativePath).parentFile, synced.last())
     }
 
     private fun assertThrowsIo(block: () -> Unit) {

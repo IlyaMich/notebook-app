@@ -73,7 +73,8 @@ internal class ManagedAssetFileStore(
      * the staged bytes there. Only the creation is atomic/non-overwriting: the copy is not
      * atomic or crash-safe, and other concurrent importers may temporarily see an incomplete
      * file and must fail closed. This method returns only after the final file is synced and
-     * hash-verified and the final directory entry has been synced. DB registration and
+     * hash-verified and the final directory entry has been synced. Publication checks use
+     * a per-process monitor and a cross-process OS file lock. DB registration and
      * orphan repair are NOT implemented.
      * Never expose the temporary staging path or an in-progress final file as a DB reference.
      */
@@ -117,72 +118,102 @@ internal class ManagedAssetFileStore(
             }
             val hash = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
             val relativePath = "assets/${hash.substring(0, 2)}/${hash.substring(2, 4)}/$hash.${type.extension}"
-            // Persist each newly created ancestor entry before making a DB reference possible.
-            val assets = ensureChildDirectory(privateFilesDir, "assets")
-            val first = ensureChildDirectory(assets, hash.substring(0, 2))
-            val parent = ensureChildDirectory(first, hash.substring(2, 4))
-            val finalFile = File(parent, "$hash.${type.extension}")
-            var createdFinal = false
-            if (!finalFile.exists()) {
-                // The fast-path exists() check is not the concurrency guard. CREATE_NEW is:
-                // it atomically refuses to open an existing file (even a symbolic link).
-                // Android API 37 rejected hard links in app-private storage; do not use them.
-                beforePublish?.invoke(finalFile)
-                val freshChannel = try {
-                    FileChannel.open(
-                        finalFile.toPath(), StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW
-                    )
-                } catch (_: FileAlreadyExistsException) {
-                    // A concurrent importer won; do not alter its destination.
-                    null
-                }
-                if (freshChannel != null) {
-                    try {
-                        freshChannel.use { destination ->
-                            staged.inputStream().use { source ->
-                                val buffer = ByteArray(8192)
-                                var written = 0L
-                                while (true) {
-                                    val count = source.read(buffer)
-                                    if (count < 0) break
-                                    if (count == 0) continue
-                                    val bytes = ByteBuffer.wrap(buffer, 0, count)
-                                    while (bytes.hasRemaining()) destination.write(bytes)
-                                    written += count.toLong()
-                                    afterPublishBytesWritten?.invoke(written)
-                                }
-                            }
-                            destination.force(true)
-                        }
-                        createdFinal = true
-                    } catch (failure: Throwable) {
-                        // We exclusively created this destination. Failed copies must not
-                        // remain as apparently finalized artifacts in the live process.
+            return withPublicationLock {
+                // Publication and all reuse checks are serialized across processes. A final
+                // path is visible during copying, but another cooperating importer cannot
+                // accept it until the writer has finished syncing or has failed and cleaned up.
+                // Persist each newly created ancestor entry before making a DB reference possible.
+                val assets = ensureChildDirectory(privateFilesDir, "assets")
+                val first = ensureChildDirectory(assets, hash.substring(0, 2))
+                val parent = ensureChildDirectory(first, hash.substring(2, 4))
+                val finalFile = File(parent, "$hash.${type.extension}")
+                var createdFinal = false
+                if (!finalFile.exists()) {
+                    // The fast-path exists() check is not the concurrency guard. CREATE_NEW is:
+                    // it atomically refuses to open an existing file (even a symbolic link).
+                    // Android API 37 rejected hard links in app-private storage; do not use them.
+                    beforePublish?.invoke(finalFile)
+                    val freshChannel = try {
+                        FileChannel.open(
+                            finalFile.toPath(), StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW
+                        )
+                    } catch (_: FileAlreadyExistsException) {
+                        // A concurrent importer won; do not alter its destination.
+                        null
+                    }
+                    if (freshChannel != null) {
                         try {
-                            Files.deleteIfExists(finalFile.toPath())
-                        } catch (cleanup: IOException) {
-                            failure.addSuppressed(cleanup)
+                            freshChannel.use { destination ->
+                                staged.inputStream().use { source ->
+                                    val buffer = ByteArray(8192)
+                                    var written = 0L
+                                    while (true) {
+                                        val count = source.read(buffer)
+                                        if (count < 0) break
+                                        if (count == 0) continue
+                                        val bytes = ByteBuffer.wrap(buffer, 0, count)
+                                        while (bytes.hasRemaining()) destination.write(bytes)
+                                        written += count.toLong()
+                                        afterPublishBytesWritten?.invoke(written)
+                                    }
+                                }
+                                destination.force(true)
+                            }
+                            createdFinal = true
+                        } catch (failure: Throwable) {
+                            // We exclusively created this destination. Failed copies must not
+                            // remain as apparently finalized artifacts in the live process.
+                            try {
+                                Files.deleteIfExists(finalFile.toPath())
+                            } catch (cleanup: IOException) {
+                                failure.addSuppressed(cleanup)
+                            }
+                            throw failure
                         }
-                        throw failure
                     }
                 }
+                // Do not follow a symbolic link in the final location. All paths are generated
+                // from our digest, but app-private corruption must not redirect verification.
+                if (!Files.isRegularFile(finalFile.toPath(), LinkOption.NOFOLLOW_LINKS) ||
+                    finalFile.length() != length || sha256(finalFile) != hash
+                ) {
+                    throw IOException("Existing content-addressed asset is corrupt")
+                }
+                // Reused complete files may originate from an interrupted writer that never
+                // reached force() or parent fsync. Repair that durability gap before success.
+                if (!createdFinal) {
+                    FileChannel.open(finalFile.toPath(), StandardOpenOption.WRITE).use { it.force(true) }
+                }
+                // A failure here may leave a complete unregistered file; never acknowledge it.
+                syncDirectoryOrThrow(parent)
+                FinalizedFile(hash, type.mime, length, relativePath)
             }
-            // Do not follow a symbolic link in the final location. All paths are generated
-            // from our digest, but app-private corruption must not redirect verification.
-            if (!Files.isRegularFile(finalFile.toPath(), LinkOption.NOFOLLOW_LINKS) ||
-                finalFile.length() != length || sha256(finalFile) != hash
-            ) {
-                throw IOException("Existing content-addressed asset is corrupt")
-            }
-            // An acknowledged file must have both synced bytes and a durable directory entry.
-            // A failure here may leave an unreferenced complete file for later reconciliation;
-            // fail closed rather than falsely returning FinalizedFile.
-            if (createdFinal) syncDirectoryOrThrow(parent)
-            return FinalizedFile(hash, type.mime, length, relativePath)
         } finally {
             // Removing an abandoned stage is always safe; finalized originals are never deleted here.
             staged.delete()
         }
+    }
+
+    /**
+     * A per-filesDir OS lock prevents another app process from accepting a file while an
+     * importer is copying, forcing, or deciding whether to remove its own failed copy.
+     * The process monitor avoids OverlappingFileLockException between store instances in
+     * the same JVM. Keep the lock outside assets/ and staging/ so the inventory ignores it.
+     * The OS releases this lock on process death; a surviving partial final then fails
+     * hash verification on the next attempt (never overwritten automatically).
+     */
+    private fun <T> withPublicationLock(action: () -> T): T = synchronized(publicationMonitor) {
+        val lockFile = File(privateFilesDir, ".asset-publication.lock")
+        if (Files.isSymbolicLink(lockFile.toPath())) {
+            throw IOException("Symlink at asset publication lock")
+        }
+        FileChannel.open(lockFile.toPath(), StandardOpenOption.WRITE, StandardOpenOption.CREATE).use { channel ->
+            channel.lock().use { action() }
+        }
+    }
+
+    private companion object {
+        val publicationMonitor = Any()
     }
 
     /** Create one controlled child directory, then persist its parent's new entry. */
