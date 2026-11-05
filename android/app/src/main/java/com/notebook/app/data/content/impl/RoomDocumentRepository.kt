@@ -84,11 +84,11 @@ class RoomDocumentRepository(
             val page = ownedPage(pages, edit.id)
             if (pages.size == 1) fail(LibraryErrorCode.INVALID_INPUT, "Cannot delete the last page")
             // Asset-aware deletes require a later reference cleanup protocol.
-            if (JSONObject(page.backgroundJson).optString("type") == "pdfPage") {
+            if (isPdfBackground(page.backgroundJson)) {
                 fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF asset deletion is not supported")
             }
             val elements = db.elementDao().listByPage(page.id)
-            if (elements.any { it.kind == "image" }) {
+            if (elements.any(::isImageContent)) {
                 fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image asset deletion is not supported")
             }
             elements.forEach { check(db.elementDao().deleteById(it.id) == 1) }
@@ -102,6 +102,10 @@ class RoomDocumentRepository(
         }
         is DocumentEdit.ChangeBackground -> {
             val page = ownedPage(pages, edit.pageId)
+            // A legacy PDF reference cannot be dropped until reference updates are atomic.
+            if (isPdfBackground(page.backgroundJson)) {
+                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF background replacement requires asset references")
+            }
             CanonicalContentValidator.background(edit.backgroundJson)
             if (page.backgroundJson == edit.backgroundJson) false else {
                 check(db.pageDao().update(page.copy(backgroundJson = edit.backgroundJson, revision = revision)) == 1)
@@ -136,6 +140,10 @@ class RoomDocumentRepository(
             val parsed = edit.envelopes.map { raw ->
                 val (id, kind) = CanonicalContentValidator.element(raw)
                 val old = existing[id] ?: fail(LibraryErrorCode.NOT_FOUND, "Element not on specified page")
+                // Valid text/shape replacements must not erase an existing image reference.
+                if (isImageContent(old)) {
+                    fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image replacement requires asset references")
+                }
                 if (isLocked(old)) fail(LibraryErrorCode.PROTECTED_ENTITY, "Locked element cannot be modified")
                 old.copy(kind = kind, elementJson = raw, revision = revision)
             }
@@ -152,7 +160,7 @@ class RoomDocumentRepository(
             if (ids.isEmpty()) false else {
                 val selected = requireSelected(existing, ids)
                 if (selected.any(::isLocked)) fail(LibraryErrorCode.PROTECTED_ENTITY, "Locked element cannot be removed")
-                if (selected.any { it.kind == "image" }) {
+                if (selected.any(::isImageContent)) {
                     fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image asset deletion is not supported")
                 }
                 ids.forEach { check(db.elementDao().deleteById(it) == 1) }
@@ -183,7 +191,7 @@ class RoomDocumentRepository(
                 val selected = requireSelected(source, ids)
                 if (selected.any(::isLocked)) fail(LibraryErrorCode.PROTECTED_ENTITY, "Locked element cannot move")
                 // Image/PDF asset-backed content is never moved until references are implemented.
-                if (selected.any { it.kind == "image" }) {
+                if (selected.any(::isImageContent)) {
                     fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image transfer requires asset management")
                 }
                 val movingInRenderOrder = source.filter { it.id in ids.toSet() }
@@ -220,6 +228,12 @@ class RoomDocumentRepository(
     }
 
     private fun isLocked(row: ElementEntity): Boolean = JSONObject(row.elementJson).optBoolean("locked", false)
+
+    private fun isPdfBackground(raw: String): Boolean = JSONObject(raw).optString("type") == "pdfPage"
+
+    /** Check both representations: older or inconsistent rows must not bypass protection. */
+    private fun isImageContent(row: ElementEntity): Boolean =
+        row.kind == "image" || JSONObject(row.elementJson).optString("type") == "image"
 
     private suspend fun setPageOrder(rows: List<PageEntity>, ids: List<String>, revision: Long): Boolean {
         validatePermutation(rows.map { it.id }, ids)
