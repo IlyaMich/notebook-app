@@ -24,16 +24,35 @@ import kotlin.math.hypot
  */
 internal object EditorEraserCanonicalHitTest {
 
+
     data class ScanResult(
         val hitElementIds: List<String>,
         val lockedElementIds: List<String>,
         val unsupportedTransformElementIds: List<String>,
-        val unresolvedPageClipElementIds: List<String> = emptyList(),
+        // Retained for compatibility with checkpoint 1B-3.
+        val unresolvedPageClipElementIds: List<String> =
+            emptyList(),
+        val unresolvedAffineGeometryElementIds: List<String> =
+            emptyList(),
     ) {
         val hasUnsupportedTransforms: Boolean
             get() = unsupportedTransformElementIds.isNotEmpty()
+
         val hasUnresolvedPageClipping: Boolean
             get() = unresolvedPageClipElementIds.isNotEmpty()
+
+        val hasUnresolvedAffineGeometry: Boolean
+            get() = unresolvedAffineGeometryElementIds.isNotEmpty()
+
+        /**
+         * Future destructive commands must refuse to use
+         * incomplete results without explicitly resolving
+         * their uncertainty.
+         */
+        val hasBlockingUncertainty: Boolean
+            get() = hasUnsupportedTransforms ||
+                hasUnresolvedPageClipping ||
+                hasUnresolvedAffineGeometry
     }
 
     fun scan(
@@ -89,7 +108,7 @@ internal object EditorEraserCanonicalHitTest {
         val hits = mutableListOf<String>()
         val locked = mutableListOf<String>()
         val unsupported = mutableListOf<String>()
-        val unresolvedPageClip = mutableListOf<String>()
+        val unresolvedAffine = mutableListOf<String>()
 
         for (stroke in strokes) {
             require(stroke.pageId == page.id) {
@@ -144,56 +163,33 @@ internal object EditorEraserCanonicalHitTest {
                 )
             }
 
+
             when (
-                EditorEraserTransformedGeometry.hitTest(
+                EditorEraserAffineClipping.classify(
                     strokePointsLocalDu = points,
-                    strokeWidthLocalDu =
-                        stroke.brush.widthDu,
+                    strokeWidthLocalDu = stroke.brush.widthDu,
                     transform = affine,
-                    eraserPointsPageDu =
-                        eraserPointsPageDu,
-                    eraserRadiusPageDu =
-                        eraserRadiusPageDu,
+                    eraserPointsPageDu = eraserPointsPageDu,
+                    eraserRadiusPageDu = eraserRadiusPageDu,
+                    pageWidthDu = page.width,
+                    pageHeightDu = page.height,
                 )
             ) {
-                Result.HIT -> {
-                    // 1B-1 has already established that this
-                    // transform is a supported similarity.
-                    val scale = hypot(affine.a, affine.b)
-
-                    val strokeRadiusPageDu =
-                        stroke.brush.widthDu * scale / 2.0
-
-                    val strokePointsPageDu = points.map(affine::map)
-
-                    when (
-                        EditorEraserPageClipping.classify(
-                            strokePointsPageDu = strokePointsPageDu,
-                            strokeRadiusPageDu = strokeRadiusPageDu,
-                            eraserPointsPageDu = eraserPointsPageDu,
-                            eraserRadiusPageDu = eraserRadiusPageDu,
-                            pageWidthDu = page.width,
-                            pageHeightDu = page.height,
-                        )
-                    ) {
-                        EditorEraserPageClipping.Verdict
-                            .CONFIRMED_VISIBLE_HIT -> {
-                            hits += stroke.elementId
-                        }
-
-                        EditorEraserPageClipping.Verdict
-                            .NO_VISIBLE_HIT -> Unit
-
-                        EditorEraserPageClipping.Verdict
-                            .UNRESOLVED_BOUNDARY -> {
-                            unresolvedPageClip += stroke.elementId
-                        }
-                    }
+                EditorEraserAffineClipping.Verdict
+                    .CONFIRMED_VISIBLE_HIT -> {
+                    hits += stroke.elementId
                 }
 
-                Result.MISS -> Unit
+                EditorEraserAffineClipping.Verdict
+                    .NO_VISIBLE_HIT -> Unit
 
-                Result.UNSUPPORTED_TRANSFORM -> {
+                EditorEraserAffineClipping.Verdict
+                    .UNRESOLVED_GEOMETRY -> {
+                    unresolvedAffine += stroke.elementId
+                }
+
+                EditorEraserAffineClipping.Verdict
+                    .UNSUPPORTED_TRANSFORM -> {
                     unsupported += stroke.elementId
                 }
             }
@@ -203,7 +199,8 @@ internal object EditorEraserCanonicalHitTest {
             hitElementIds = hits,
             lockedElementIds = locked,
             unsupportedTransformElementIds = unsupported,
-            unresolvedPageClipElementIds = unresolvedPageClip,
+            unresolvedAffineGeometryElementIds =
+                unresolvedAffine,
         )
     }
 }

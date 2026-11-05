@@ -181,27 +181,39 @@ class EditorEraserCanonicalHitTestTest {
             result.lockedElementIds,
         )
     }
-
+    
     @Test
-    fun unsupportedTransformIsReportedNotSilentlyMissed() {
+    fun nonuniformTransformIsSupportedAndNotReportedAsUnsupported() {
         val nonuniform = strokeEnvelope(
             a = 2.0,
             d = 1.0,
+            ty = 50.0,
         )
 
         val result = scan(
             page(envelope = nonuniform),
-            listOf(p(50.0, 0.0)),
+            listOf(p(50.0, 50.0)),
         )
 
-        assertTrue(result.hitElementIds.isEmpty())
-
+        // The stroke is visibly intersected by the eraser.
         assertEquals(
             listOf(strokeId),
-            result.unsupportedTransformElementIds,
+            result.hitElementIds,
         )
 
-        assertTrue(result.hasUnsupportedTransforms)
+        // Nonuniform scaling is now supported by the
+        // general affine collision classifier.
+        assertTrue(
+            result.unsupportedTransformElementIds.isEmpty()
+        )
+
+        // This is a definite interior collision,
+        // not an ambiguous geometric boundary case.
+        assertTrue(
+            result.unresolvedAffineGeometryElementIds.isEmpty()
+        )
+
+        assertFalse(result.hasBlockingUncertainty)
     }
 
     @Test
@@ -271,10 +283,7 @@ class EditorEraserCanonicalHitTestTest {
     }
 
     @Test
-    fun uncertainPageClippingIsReportedSeparately() {
-        // A portion of the stroke enters the page,
-        // but the eraser's obvious intersection
-        // is outside it.
+    fun outsideOnlyIntersectionIsResolvedAsMissByAffineClassifier() {
         val edgeStroke = strokeEnvelope(
             tx = -99.5,
             ty = 50.0,
@@ -288,15 +297,126 @@ class EditorEraserCanonicalHitTestTest {
             ),
         )
 
+        // The new affine classifier proves that the
+        // collision lies outside the visible page.
+        assertTrue(result.hitElementIds.isEmpty())
+
+        assertTrue(
+            result.unresolvedPageClipElementIds.isEmpty()
+        )
+
+        assertTrue(
+            result.unresolvedAffineGeometryElementIds.isEmpty()
+        )
+
+        assertFalse(result.hasBlockingUncertainty)
+    }
+
+    @Test
+    fun nonuniformlyScaledCanonicalStrokeCanBeHit() {
+        val nonuniform = strokeEnvelope(
+            a = 2.0,
+            d = 0.5,
+            tx = 50.0,
+            ty = 50.0,
+        )
+
+        val result = scan(
+            page(envelope = nonuniform),
+            listOf(p(100.0, 50.0)),
+        )
+
+        assertEquals(
+            listOf(strokeId),
+            result.hitElementIds,
+        )
+        assertFalse(result.hasBlockingUncertainty)
+    }
+
+    @Test
+    fun nonuniformlyScaledCanonicalStrokeCanMiss() {
+        val nonuniform = strokeEnvelope(
+            a = 2.0,
+            d = 0.5,
+            tx = 50.0,
+            ty = 50.0,
+        )
+
+        val result = scan(
+            page(envelope = nonuniform),
+            listOf(p(100.0, 80.0)),
+        )
+
+        assertTrue(result.hitElementIds.isEmpty())
+        assertFalse(result.hasBlockingUncertainty)
+    }
+
+    @Test
+    fun shearedCanonicalStrokeUsesCompleteBrushTransform() {
+        val sheared = strokeEnvelope(
+            a = 1.0,
+            b = 0.5,
+            c = 0.0,
+            d = 1.0,
+            tx = 50.0,
+            ty = 50.0,
+        )
+
+        val result = scan(
+            page(envelope = sheared),
+            listOf(p(100.0, 75.0)),
+        )
+
+        assertEquals(
+            listOf(strokeId),
+            result.hitElementIds,
+        )
+        assertFalse(result.hasBlockingUncertainty)
+    }
+
+    @Test
+    fun shearedCanonicalStrokeOutsideSweepIsMiss() {
+        val sheared = strokeEnvelope(
+            a = 1.0,
+            b = 0.5,
+            c = 0.0,
+            d = 1.0,
+            tx = 50.0,
+            ty = 50.0,
+        )
+
+        val result = scan(
+            page(envelope = sheared),
+            listOf(p(100.0, 110.0)),
+        )
+
+        assertTrue(result.hitElementIds.isEmpty())
+        assertFalse(result.hasBlockingUncertainty)
+    }
+
+    @Test
+    fun tangentialContactIsReportedAsUnresolved() {
+        val raised = strokeEnvelope(
+            ty = 50.0,
+        )
+
+        // Stroke centerline is at y = 50.
+        // Width = 2, so stroke radius = 1.
+        // Eraser radius = 3.
+        // Distance = 4, giving exact tangency.
+        val result = scan(
+            page(envelope = raised),
+            listOf(p(50.0, 54.0)),
+        )
+
         assertTrue(result.hitElementIds.isEmpty())
 
         assertEquals(
             listOf(strokeId),
-            result.unresolvedPageClipElementIds,
+            result.unresolvedAffineGeometryElementIds,
         )
 
-        assertTrue(result.hasUnresolvedPageClipping)
-        assertFalse(result.hasUnsupportedTransforms)
+        assertTrue(result.hasUnresolvedAffineGeometry)
+        assertTrue(result.hasBlockingUncertainty)
     }
-
 }
