@@ -60,6 +60,9 @@ class RoomDocumentRepository(
     ): DocumentCommit = db.withTransaction {
         val id = LibraryValidation.canonicalId(noteId)
         val note = db.noteDao().findById(id) ?: fail(LibraryErrorCode.NOT_FOUND, "Note not found")
+        if (edit is DocumentEdit.RestoreRemovedStrokes && expectedRevision == null) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Stroke restoration requires a guarded commit")
+        }
         if (expectedRevision != null && note.revision != expectedRevision) {
             fail(LibraryErrorCode.INVALID_INPUT, "Stale document edit: note revision has changed")
         }
@@ -194,6 +197,59 @@ class RoomDocumentRepository(
                 setElementOrder(remaining, remaining.map { it.id }, revision)
                 true
             }
+        }
+        is DocumentEdit.RestoreRemovedStrokes -> {
+            val page = ownedPage(pages, edit.pageId)
+            val surviving = elementsFor(page.id)
+            if (edit.envelopes.isEmpty()) {
+                fail(LibraryErrorCode.INVALID_INPUT, "Restoration requires removed strokes")
+            }
+
+            // Validate every restored envelope BEFORE inserting any rows.
+            // This is a narrow eraser inverse, not an arbitrary element importer.
+            val restoring = edit.envelopes.map { raw ->
+                val (id, kind) = CanonicalContentValidator.element(raw)
+                if (kind != "stroke") {
+                    fail(LibraryErrorCode.INVALID_INPUT, "Only erased strokes can be restored")
+                }
+                ElementEntity(id, page.id, 0L, kind, raw, revision)
+            }
+            val restoringIds = restoring.map { it.id }
+            uniqueIds(restoringIds)
+            if (restoring.any(::isLocked)) {
+                fail(LibraryErrorCode.PROTECTED_ENTITY, "Locked strokes cannot be restored by eraser undo")
+            }
+
+            val originalOrder = edit.idsInOrder.map(LibraryValidation::canonicalId)
+            uniqueIds(originalOrder)
+            val existingIds = surviving.map { it.id }
+            val restoredIdSet = restoringIds.toSet()
+            val existingIdSet = existingIds.toSet()
+            if (restoredIdSet.any { it in existingIdSet }) {
+                fail(LibraryErrorCode.INVALID_INPUT, "Restored element already exists on page")
+            }
+            if (originalOrder.size != existingIds.size + restoringIds.size ||
+                originalOrder.toSet() != existingIdSet + restoredIdSet ||
+                originalOrder.filter { it !in restoredIdSet } != existingIds
+            ) {
+                fail(LibraryErrorCode.INVALID_INPUT, "Current survivors differ from original eraser snapshot")
+            }
+            // IDs are note-wide unique. A newly occupied ID on ANOTHER page
+            // must fail safely rather than attaching an existing object here.
+            for (restoredId in restoringIds) {
+                if (db.elementDao().findById(restoredId) != null) {
+                    fail(LibraryErrorCode.INVALID_INPUT, "Restored element ID is already occupied")
+                }
+            }
+
+            // New rows initially occupy a free contiguous tail. The existing
+            // two-phase ordering helper then places them at their exact former
+            // positions in this same transaction, including around locked rows.
+            restoring.forEachIndexed { index, row ->
+                db.elementDao().insert(row.copy(orderIndex = surviving.size.toLong() + index))
+            }
+            setElementOrder(db.elementDao().listByPage(page.id), originalOrder, revision)
+            true
         }
         is DocumentEdit.ReorderElements -> {
             val page = ownedPage(pages, edit.pageId)

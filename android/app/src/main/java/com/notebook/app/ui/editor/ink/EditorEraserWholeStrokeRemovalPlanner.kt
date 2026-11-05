@@ -29,6 +29,7 @@ internal object EditorEraserWholeStrokeRemovalPlanner {
         val originalElementIdsInOrder: List<String>,
         val removed: List<RemovedSnapshot>,
         val forwardEdit: DocumentEdit.RemoveElements,
+        val inverseEdit: DocumentEdit.RestoreRemovedStrokes,
     )
 
     /**
@@ -107,6 +108,11 @@ internal object EditorEraserWholeStrokeRemovalPlanner {
             forwardEdit = DocumentEdit.RemoveElements(
                 pageId = pageId,
                 ids = removed.map { it.element.id },
+            ),
+            inverseEdit = DocumentEdit.RestoreRemovedStrokes(
+                pageId = pageId,
+                envelopes = removed.map { it.element.envelopeJson },
+                idsInOrder = ordered.map { it.id },
             ),
         )
     }

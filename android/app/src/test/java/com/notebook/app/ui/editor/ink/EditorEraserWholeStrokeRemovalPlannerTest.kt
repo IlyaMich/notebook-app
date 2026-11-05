@@ -68,6 +68,14 @@ class EditorEraserWholeStrokeRemovalPlannerTest {
         val result = requireNotNull(plan(content, hits = listOf(c, a)))
 
         assertEquals(DocumentEdit.RemoveElements(pageId, listOf(a, c)), result.forwardEdit)
+        assertEquals(
+            DocumentEdit.RestoreRemovedStrokes(
+                pageId = pageId,
+                envelopes = listOf(elements[1].envelopeJson, elements[0].envelopeJson),
+                idsInOrder = listOf(a, b, c, d),
+            ),
+            result.inverseEdit,
+        )
         assertEquals(listOf(a, b, c, d), result.originalElementIdsInOrder)
         assertEquals(listOf(0, 2), result.removed.map { it.originalPosition })
         assertEquals(listOf(elements[1], elements[0]), result.removed.map { it.element })
