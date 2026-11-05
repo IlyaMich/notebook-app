@@ -60,6 +60,11 @@ import androidx.compose.runtime.rememberUpdatedState
 import com.notebook.app.ui.editor.ink.EditorPenDocumentCodec
 import com.notebook.app.ui.editor.ink.EditorInkBrushPresets
 import com.notebook.app.ui.editor.ink.EditorInkPreviewCanvasRenderer
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 
 /** Read-only snapshot for this checkpoint. Use page IDs/dimensions from DocumentRepository.load. */
 data class PageViewportItem(
@@ -121,6 +126,7 @@ fun ContinuousPageViewport(
     val latestOnPenStrokeError by
     rememberUpdatedState(onPenStrokeError)
 
+    val lifecycleOwner = LocalLifecycleOwner.current
     val layout = remember(pages) {
         ViewportGeometry.layoutOrNull(pages.map { PageSizeDu(it.id, it.widthDu, it.heightDu) })
     }
@@ -176,6 +182,53 @@ fun ContinuousPageViewport(
     var livePreviewTool by remember(documentKey) {
         mutableStateOf<EditorInkTool?>(null)
     }
+
+    // 2E-1: A lifecycle pause must invalidate an unfinished gesture,
+    // even when the viewport remains in the composition.
+    var inputSessionGeneration by remember(documentKey) {
+        mutableIntStateOf(0)
+    }
+
+    var inputResumed by remember(documentKey, lifecycleOwner) {
+        mutableStateOf(
+            lifecycleOwner.lifecycle.currentState.isAtLeast(
+                Lifecycle.State.RESUMED
+            )
+        )
+    }
+
+    DisposableEffect(lifecycleOwner, documentKey) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    inputResumed = false
+
+                    // Restarting pointerInput discards its old
+                    // gesture ownership and transient capture.
+                    inputSessionGeneration += 1
+
+                    // Clear visual feedback immediately.
+                    livePenPreview = null
+                    livePreviewTool = null
+                }
+
+                Lifecycle.Event.ON_RESUME -> {
+                    // Input can resume, but only a fresh
+                    // pointer-down may begin a stroke.
+                    inputResumed = true
+                }
+
+                else -> Unit
+            }
+        }
+
+        lifecycleOwner.lifecycle.addObserver(observer)
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     // remember survives only recomposition, not a rotation that recreates the Activity.
     // Save a minimal, note-keyed page-local bookmark that can be rebuilt for any screen size.
     var savedPageId by rememberSaveable(documentKey) { mutableStateOf("") }
@@ -323,7 +376,11 @@ fun ContinuousPageViewport(
                 gutterPx,
                 fingerWritingPreview,
                 selectedTool,
+                lifecycleOwner,
+                inputSessionGeneration,
+                inputResumed,
             ) {
+                if (!inputResumed) return@pointerInput
                 val owner = EditorGestureOwnership()
                 val capture = EditorPenCapture()
 
@@ -481,6 +538,16 @@ fun ContinuousPageViewport(
                             val event = awaitPointerEvent(
                                 PointerEventPass.Main,
                             )
+
+                            // A pause can occur before recomposition has restarted
+                            // pointerInput. Reject events from that interrupted session.
+                            if (!lifecycleOwner.lifecycle.currentState.isAtLeast(
+                                    Lifecycle.State.RESUMED
+                                )
+                            ) {
+                                processEffects(owner.cancelAll())
+                                continue
+                            }
 
                             // A platform-cancelled gesture can arrive as a consumed
                             // pointer-up event. Never treat that as a completed stroke.
