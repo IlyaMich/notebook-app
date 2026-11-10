@@ -282,11 +282,14 @@ fun NoteEditorScreen(
                     .padding(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                EditorInkTool.entries.forEach { tool ->
+                // ERASER is not yet a user-facing control: partial erase and
+                // failure-recovery UI are still outstanding in EDT-16.
+                EditorInkTool.entries.filter { it != EditorInkTool.ERASER }.forEach { tool ->
                     val label = when (tool) {
                         EditorInkTool.PEN -> "Pen"
                         EditorInkTool.PENCIL -> "Pencil"
                         EditorInkTool.HIGHLIGHTER -> "Highlighter"
+                        EditorInkTool.ERASER -> "Eraser"
                     }
 
                     FilterChip(

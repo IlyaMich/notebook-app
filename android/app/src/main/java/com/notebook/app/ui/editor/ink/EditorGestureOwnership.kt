@@ -59,7 +59,8 @@ internal class EditorGestureOwnership {
             activeStroke?.contact == EditorContact.FINGER &&
                 (
                     (contact == EditorContact.FINGER && fingerCount > 1) ||
-                        contact == EditorContact.STYLUS
+                        contact == EditorContact.STYLUS ||
+                        (contact == EditorContact.ERASER && selectedTool == EditorInkTool.ERASER)
                     )
 
         if (cancelFingerStroke) {
@@ -121,7 +122,8 @@ internal class EditorGestureOwnership {
                 // started remains registered and may resume later.
                 if (
                     contact == EditorContact.FINGER &&
-                    activeStroke?.contact != EditorContact.STYLUS
+                    activeStroke?.contact != EditorContact.STYLUS &&
+                    activeStroke?.contact != EditorContact.ERASER
                 ) {
                     navigationPointers += pointerId
                 }

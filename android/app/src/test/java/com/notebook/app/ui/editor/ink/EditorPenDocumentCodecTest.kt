@@ -213,7 +213,7 @@ class EditorPenDocumentCodecTest {
 
         assertEquals(
             EditorInkTool.entries.toSet(),
-            expectations.keys,
+            expectations.keys + EditorInkTool.ERASER,
         )
 
         expectations.forEach { (tool, expected) ->
@@ -272,7 +272,9 @@ class EditorPenDocumentCodecTest {
     fun toolSelectionDoesNotChangeCanonicalStrokeGeometry() {
         val original = captured()
 
-        val strokes = EditorInkTool.entries.map { tool ->
+        val strokes = EditorInkTool.entries
+            .filterNot { it == EditorInkTool.ERASER }
+            .map { tool ->
             val envelope = EditorPenDocumentCodec.encode(
                 completed = original,
                 layout = layout,
@@ -301,5 +303,15 @@ class EditorPenDocumentCodecTest {
                 stroke.elementId,
             )
         }
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun eraserCannotBeEncodedAsCanonicalDrawingStroke() {
+        EditorPenDocumentCodec.encode(
+            completed = captured(),
+            layout = layout,
+            elementId = elementId,
+            tool = EditorInkTool.ERASER,
+        )
     }
 }

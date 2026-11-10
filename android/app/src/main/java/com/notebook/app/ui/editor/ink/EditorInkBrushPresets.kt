@@ -47,5 +47,10 @@ internal object EditorInkBrushPresets {
                 colorHex = "#FFE45C",
                 opacity = 0.35,
             )
+
+            // Fail closed rather than accidentally encoding an eraser gesture as ink.
+            EditorInkTool.ERASER -> throw IllegalArgumentException(
+                "Eraser is not a canonical drawing brush"
+            )
         }
 }
