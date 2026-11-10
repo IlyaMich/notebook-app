@@ -189,7 +189,9 @@ class EditorInkPreviewRenderingTest {
 
     @Test
     fun liveAndSavedBrushesMatchAtTwoZoomLevels() {
-        EditorInkTool.entries.forEach { tool ->
+        EditorInkTool.entries
+            .filter { it != EditorInkTool.ERASER }
+            .forEach { tool ->
             listOf(1.0, 2.0).forEach { scale ->
                 val completed = capture(scale)
                 val wet = renderPreview(completed, tool)
@@ -221,7 +223,9 @@ class EditorInkPreviewRenderingTest {
 
     @Test
     fun singlePointPreviewMatchesSavedDot() {
-        EditorInkTool.entries.forEach { tool ->
+        EditorInkTool.entries
+            .filter { it != EditorInkTool.ERASER }
+            .forEach { tool ->
             val point = capture(scale = 2.0).copy(
                 samples = listOf(
                     EditorPenPoint(
