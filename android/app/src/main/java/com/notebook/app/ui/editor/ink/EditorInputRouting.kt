@@ -5,6 +5,9 @@ enum class EditorInkTool {
     PEN,
     PENCIL,
     HIGHLIGHTER,
+    // Internal capture route only. The production editor does not expose this
+    // control until the rest of EDT-16 is verified.
+    ERASER,
 }
 
 internal enum class EditorContact {
@@ -73,7 +76,14 @@ internal object EditorInputRouting {
                 }
             }
 
-            EditorContact.ERASER,
+            EditorContact.ERASER -> {
+                if (selectedTool == EditorInkTool.ERASER) {
+                    EditorPointerAction.DRAW
+                } else {
+                    EditorPointerAction.IGNORE
+                }
+            }
+
             EditorContact.MOUSE,
             EditorContact.UNKNOWN ->
                 EditorPointerAction.IGNORE

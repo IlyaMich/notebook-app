@@ -11,6 +11,42 @@ sealed interface DocumentEdit {
     data class InsertElements(val pageId: String, val envelopes: List<String>, val at: Int? = null) : DocumentEdit
     data class ReplaceElements(val pageId: String, val envelopes: List<String>) : DocumentEdit
     data class RemoveElements(val pageId: String, val ids: List<String>) : DocumentEdit
+    /**
+     * Exact inverse of a whole-stroke removal. [envelopes] contain the original
+     * untouched serialized stroke objects, in their former page render order.
+     * [idsInOrder] is the COMPLETE pre-removal page order (including survivors).
+     *
+     * This command is deliberately limited to unlocked strokes. It must be
+     * submitted with commitIfRevision() using the forward commit's revision;
+     * restoring objects at stale positions must never be silently attempted.
+     */
+    data class RestoreRemovedStrokes(
+        val pageId: String,
+        val envelopes: List<String>,
+        val idsInOrder: List<String>,
+    ) : DocumentEdit
+    /** One affected original stroke and its zero-or-more newly-IDed fragments. */
+    data class PartialStrokeReplacement(
+        val originalEnvelope: String,
+        val fragmentEnvelopes: List<String>,
+    )
+    /**
+     * Atomic forward partial erase. The page order lists include ALL unaffected rows.
+     * Both forward and inverse require commitIfRevision; never submit via commit().
+     */
+    data class ApplyPartialStrokeReplacements(
+        val pageId: String,
+        val originalIdsInOrder: List<String>,
+        val resultingIdsInOrder: List<String>,
+        val replacements: List<PartialStrokeReplacement>,
+    ) : DocumentEdit
+    /** Restore exact original stroke bytes and remove exact generated fragments. */
+    data class RestorePartialStrokeReplacements(
+        val pageId: String,
+        val originalIdsInOrder: List<String>,
+        val resultingIdsInOrder: List<String>,
+        val replacements: List<PartialStrokeReplacement>,
+    ) : DocumentEdit
     data class ReorderElements(val pageId: String, val idsInOrder: List<String>) : DocumentEdit
     /** Cross-page transfer within one note preserves element IDs and their relative order. */
     data class TransferElements(

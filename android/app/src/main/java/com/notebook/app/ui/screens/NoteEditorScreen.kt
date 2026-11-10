@@ -19,6 +19,13 @@ import com.notebook.app.data.content.repository.DocumentRepository
 import com.notebook.app.data.library.model.Note
 import com.notebook.app.data.library.repository.NoteRepository
 import com.notebook.app.ui.editor.NoteAutosaveCoordinator
+import com.notebook.app.ui.editor.EraserSessionCommitResult
+import com.notebook.app.ui.editor.NoteEditorEraserToolbarPolicy
+import com.notebook.app.ui.editor.NoteEditorEraserMode
+import com.notebook.app.ui.editor.NoteEditorWholeStrokeEraser
+import com.notebook.app.ui.editor.WholeStrokeEraserGestureResult
+import com.notebook.app.ui.editor.NoteEditorPartialStrokeEraser
+import com.notebook.app.ui.editor.PartialStrokeEraserGestureResult
 import com.notebook.app.ui.editor.SavePhase
 import com.notebook.app.ui.editor.SaveRetryResult
 import kotlinx.coroutines.launch
@@ -76,7 +83,13 @@ fun NoteEditorScreen(
     var selectedTool by rememberSaveable(noteId) {
         mutableStateOf(EditorInkTool.PEN)
     }
+    var eraserMode by rememberSaveable(noteId) {
+        mutableStateOf(NoteEditorEraserMode.PARTIAL)
+    }
     var penInputError by remember(noteId) {
+        mutableStateOf<String?>(null)
+    }
+    var eraserInputError by remember(noteId) {
         mutableStateOf<String?>(null)
     }
 
@@ -130,6 +143,50 @@ fun NoteEditorScreen(
 
 
     val saveState = coordinator?.state?.collectAsState()?.value
+    val eraserHistoryState = coordinator?.eraserHistory?.collectAsState()?.value
+    val eraserUiReady = NoteEditorEraserToolbarPolicy.canErase(
+        saveState, content?.revision,
+    )
+
+    fun performEraserHistoryAction(undo: Boolean) {
+        val active = coordinator ?: return
+        val isEligible = if (undo) {
+            NoteEditorEraserToolbarPolicy.canUndo(
+                active.state.value, content?.revision, active.eraserHistory.value,
+            )
+        } else {
+            NoteEditorEraserToolbarPolicy.canRedo(
+                active.state.value, content?.revision, active.eraserHistory.value,
+            )
+        }
+        if (!isEligible) {
+            eraserInputError = "Eraser history unavailable until the preview is current and saved"
+            return
+        }
+        scope.launch {
+            try {
+                val outcome = if (undo) {
+                    active.undoEraserEdit().await()
+                } else {
+                    active.redoEraserEdit().await()
+                }
+                eraserInputError = when (outcome) {
+                    is EraserSessionCommitResult.Committed -> null
+                    is EraserSessionCommitResult.Rejected ->
+                        "Eraser history not applied: ${outcome.reason}"
+                    is EraserSessionCommitResult.Unconfirmed ->
+                        "Eraser history save outcome uncertain. Reload the note " +
+                            "before performing more edits."
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                eraserInputError =
+                    "Could not confirm eraser history outcome. Reload the note " +
+                        "before performing more edits."
+            }
+        }
+    }
 
     suspend fun reloadPreview() {
         try {
@@ -282,15 +339,19 @@ fun NoteEditorScreen(
                     .padding(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                // EDT-16 1E-7A: partial-stroke erase is the default eraser mode.
+                // The coordinator and Room still enforce admission and revision guards.
                 EditorInkTool.entries.forEach { tool ->
                     val label = when (tool) {
                         EditorInkTool.PEN -> "Pen"
                         EditorInkTool.PENCIL -> "Pencil"
                         EditorInkTool.HIGHLIGHTER -> "Highlighter"
+                        EditorInkTool.ERASER -> "Eraser"
                     }
 
                     FilterChip(
                         selected = selectedTool == tool,
+                        enabled = tool != EditorInkTool.ERASER || eraserUiReady,
                         onClick = {
                             selectedTool = tool
                         },
@@ -302,7 +363,6 @@ fun NoteEditorScreen(
 
                 // The remaining editor tools are not implemented yet.
                 listOf(
-                    "Eraser",
                     "Lasso",
                     "Shapes",
                     "Text",
@@ -328,11 +388,63 @@ fun NoteEditorScreen(
             ) {
                 Text(
                     if (fingerWritingPreview) {
-                        "Finger Pen mode: ON (autosaved)"
+                        if (selectedTool == EditorInkTool.ERASER) {
+                            "Finger eraser mode: ON"
+                        } else {
+                            "Finger Pen mode: ON (autosaved)"
+                        }
                     } else {
-                        "Enable finger Pen writing"
+                        if (selectedTool == EditorInkTool.ERASER) {
+                            "Enable finger erasing"
+                        } else {
+                            "Enable finger Pen writing"
+                        }
                     }
                 )
+            }
+
+            if (selectedTool == EditorInkTool.ERASER) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    NoteEditorEraserMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = eraserMode == mode,
+                            enabled = eraserUiReady,
+                            onClick = { eraserMode = mode },
+                            label = { Text(mode.label) },
+                        )
+                    }
+                }
+                Text(
+                    "${eraserMode.label} selected. Stylus erases; enable finger input " +
+                        "to erase with touch. Changes can be undone while this " +
+                        "editing session remains open.",
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+
+            Row(
+                modifier = Modifier.padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                TextButton(
+                    enabled = NoteEditorEraserToolbarPolicy.canUndo(
+                        saveState, content?.revision, eraserHistoryState,
+                    ),
+                    onClick = { performEraserHistoryAction(undo = true) },
+                ) { Text("Undo eraser") }
+                TextButton(
+                    enabled = NoteEditorEraserToolbarPolicy.canRedo(
+                        saveState, content?.revision, eraserHistoryState,
+                    ),
+                    onClick = { performEraserHistoryAction(undo = false) },
+                ) { Text("Redo eraser") }
             }
 
             when {
@@ -382,6 +494,13 @@ fun NoteEditorScreen(
                         if (penInputError != null) {
                             Text(
                                 text = penInputError.orEmpty(),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        if (eraserInputError != null) {
+                            Text(
+                                text = eraserInputError.orEmpty(),
                                 color = MaterialTheme.colorScheme.error,
                                 style = MaterialTheme.typography.bodySmall,
                             )
@@ -539,6 +658,7 @@ fun NoteEditorScreen(
                         documentKey = noteId,
                         fingerWritingPreview = fingerWritingPreview,
                         selectedTool = selectedTool,
+                        eraserModeKey = eraserMode.name,
                         onPenStrokeCompleted = { pageId, envelopeJson ->
                             // Keep the existing 2C-2 autosave callback unchanged.
                             val activeCoordinator = coordinator
@@ -558,6 +678,79 @@ fun NoteEditorScreen(
                         },
                         onPenStrokeError = { message ->
                             penInputError = message
+                        },
+                        // EDT-16 1E-7A: the toolbar now exposes PARTIAL erasing.
+                        // The service and coordinator still reject stale/unsafe actions.
+                        onEraserSweepCaptured = { pageId, pointsPageDu, radiusPageDu ->
+                            val activeCoordinator = coordinator
+                            val renderedAtRelease = content
+                            val modeAtRelease = eraserMode
+                            if (activeCoordinator == null || renderedAtRelease == null) {
+                                eraserInputError = "Eraser unavailable: editor session not ready"
+                            } else {
+                                // Freeze page coordinates and the visible note revision
+                                // before launching any asynchronous work.
+                                val finishedPoints = pointsPageDu.toList()
+                                scope.launch {
+                                    try {
+                                        eraserInputError = when (modeAtRelease) {
+                                            NoteEditorEraserMode.PARTIAL -> {
+                                                when (val result = NoteEditorPartialStrokeEraser(
+                                                    noteId = noteId,
+                                                    repository = documentRepository,
+                                                    coordinator = activeCoordinator,
+                                                ).submitViewportSweep(
+                                                    renderedSnapshot = renderedAtRelease,
+                                                    pageId = pageId,
+                                                    pointsPageDu = finishedPoints,
+                                                    radiusPageDu = radiusPageDu,
+                                                )) {
+                                                    is PartialStrokeEraserGestureResult.Committed,
+                                                    PartialStrokeEraserGestureResult.NoHit -> null
+                                                    is PartialStrokeEraserGestureResult.Blocked ->
+                                                        "Eraser blocked: ${result.reason}"
+                                                    is PartialStrokeEraserGestureResult.Rejected ->
+                                                        "Eraser not applied: ${result.reason}"
+                                                    is PartialStrokeEraserGestureResult.Unconfirmed ->
+                                                        "Eraser save outcome uncertain. Reload the note " +
+                                                            "before performing more edits."
+                                                }
+                                            }
+                                            NoteEditorEraserMode.WHOLE_STROKE -> {
+                                                when (val result = NoteEditorWholeStrokeEraser(
+                                                    noteId = noteId,
+                                                    repository = documentRepository,
+                                                    coordinator = activeCoordinator,
+                                                ).submitViewportSweep(
+                                                    renderedSnapshot = renderedAtRelease,
+                                                    pageId = pageId,
+                                                    pointsPageDu = finishedPoints,
+                                                    radiusPageDu = radiusPageDu,
+                                                )) {
+                                                    is WholeStrokeEraserGestureResult.Committed,
+                                                    WholeStrokeEraserGestureResult.NoHit,
+                                                    WholeStrokeEraserGestureResult.Cancelled -> null
+                                                    is WholeStrokeEraserGestureResult.Blocked ->
+                                                        "Eraser blocked: ${result.reason}"
+                                                    is WholeStrokeEraserGestureResult.Rejected ->
+                                                        "Eraser not applied: ${result.reason}"
+                                                    is WholeStrokeEraserGestureResult.Unconfirmed ->
+                                                        "Eraser save outcome uncertain. Reload the note " +
+                                                            "before performing more edits."
+                                                }
+                                            }
+                                        }
+                                        // Existing save-state observer reloads the Room
+                                        // snapshot only after a confirmed revision.
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
+                                    } catch (failure: Exception) {
+                                        eraserInputError =
+                                            "Could not confirm eraser outcome. Reload the note " +
+                                                "before performing more edits."
+                                    }
+                                }
+                            }
                         },
                         modifier = Modifier
                             .fillMaxWidth()

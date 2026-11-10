@@ -11,4 +11,20 @@ interface DocumentRepository {
 
     /** Returns only after durable Room commit. A no-op returns the existing revision. */
     suspend fun commit(noteId: String, edit: DocumentEdit): DocumentCommit
+
+    /**
+     * Atomically reject this edit unless the note is still at [expectedRevision].
+     * The comparison and any mutation MUST occur in the same storage transaction.
+     *
+     * Fail closed for existing repository decorators/test doubles that have not
+     * explicitly implemented conditional commits. Never emulate this using
+     * load() followed by commit(): that creates a time-of-check/time-of-use race.
+     */
+    suspend fun commitIfRevision(
+        noteId: String,
+        expectedRevision: Long,
+        edit: DocumentEdit,
+    ): DocumentCommit = throw UnsupportedOperationException(
+        "This repository does not support atomic revision-guarded commits"
+    )
 }

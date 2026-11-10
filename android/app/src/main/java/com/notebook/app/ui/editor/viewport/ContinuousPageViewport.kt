@@ -117,9 +117,16 @@ fun ContinuousPageViewport(
     storedPages: Map<String, StoredPage> = emptyMap(),
     fingerWritingPreview: Boolean = false,
     selectedTool: EditorInkTool = EditorInkTool.PEN,
+    eraserModeKey: String = "partial",
     onPenStrokeCompleted: (String, String) -> Unit = { _, _ -> },
     onPenStrokeError: (String) -> Unit = {},
+    // A capture-only, non-destructive integration callback. The real editor
+    // intentionally does not provide this callback or expose ERASER yet.
+    onEraserSweepCaptured: (String, List<DuPoint>, Double) -> Unit = { _, _, _ -> },
 ) {
+    val latestOnEraserSweepCaptured by
+        rememberUpdatedState(onEraserSweepCaptured)
+
     val latestOnPenStrokeCompleted by
     rememberUpdatedState(onPenStrokeCompleted)
 
@@ -149,6 +156,9 @@ fun ContinuousPageViewport(
 
     // Pointer events and canvas dimensions are in physical pixels, not DP or document units.
     val density = LocalDensity.current
+    // Viewport routing converts this physical-pixel radius to DU once,
+    // at pointer-down using the captured zoom. Configurable UI comes later.
+    val eraserRadiusPx = with(density) { 12.dp.toPx().toDouble() }
     val gutterPx = with(density) { 16.dp.toPx().toDouble() }
     val labelInsetPx = with(density) { 16.dp.toPx() }
     val labelBaselinePx = with(density) { 30.dp.toPx() }
@@ -376,6 +386,10 @@ fun ContinuousPageViewport(
                 gutterPx,
                 fingerWritingPreview,
                 selectedTool,
+                eraserModeKey,
+                // A changed rendered snapshot invalidates an active eraser
+                // gesture; pen capture retains its original update behavior.
+                if (selectedTool == EditorInkTool.ERASER) storedPages else null,
                 lifecycleOwner,
                 inputSessionGeneration,
                 inputResumed,
@@ -383,6 +397,16 @@ fun ContinuousPageViewport(
                 if (!inputResumed) return@pointerInput
                 val owner = EditorGestureOwnership()
                 val capture = EditorPenCapture()
+                val eraser = EditorEraserViewportGestureRouter()
+
+                fun eraserFrame(camera: ViewportTransform) =
+                    EditorEraserViewportGestureRouter.Frame(
+                        documentKey = documentKey,
+                        generation = inputSessionGeneration,
+                        layout = layout,
+                        viewport = viewportPx,
+                        transform = camera,
+                    )
 
                 val fingerMode = if (fingerWritingPreview) {
                     EditorFingerMode.WRITE
@@ -397,10 +421,26 @@ fun ContinuousPageViewport(
                     effects: List<EditorGestureOwnership.Effect>,
                     initialPoint: EditorPenPoint? = null,
                     cameraAtStart: ViewportTransform? = null,
+                    releasePoint: PxPoint? = null,
                 ) {
                     effects.forEach { effect ->
                         when (effect) {
                             is EditorGestureOwnership.Effect.Started -> {
+                                if (effect.stroke.tool == EditorInkTool.ERASER) {
+                                    val started = initialPoint != null &&
+                                        cameraAtStart != null &&
+                                        eraser.begin(
+                                            pointerId = effect.stroke.pointerId,
+                                            pointPx = PxPoint(initialPoint.xPx, initialPoint.yPx),
+                                            radiusPx = eraserRadiusPx,
+                                            frame = eraserFrame(cameraAtStart),
+                                        )
+                                    drawingPointerId = if (started) effect.stroke.pointerId else null
+                                    livePenPreview = null
+                                    livePreviewTool = null
+                                    return@forEach
+                                }
+
                                 val started = if (
                                     initialPoint != null &&
                                     cameraAtStart != null
@@ -433,6 +473,35 @@ fun ContinuousPageViewport(
                                     drawingPointerId ==
                                     effect.stroke.pointerId
                                 ) {
+                                    if (effect.stroke.tool == EditorInkTool.ERASER) {
+                                        val current = session?.takeIf {
+                                            it.layout == layout &&
+                                                it.viewport == viewportPx &&
+                                                it.gutterPx == gutterPx
+                                        }
+                                        val pending = if (current != null && releasePoint != null) {
+                                            eraser.finish(
+                                                pointerId = effect.stroke.pointerId,
+                                                pointPx = releasePoint,
+                                                frame = eraserFrame(current.transform),
+                                            )
+                                        } else null
+                                        drawingPointerId = null
+                                        livePenPreview = null
+                                        livePreviewTool = null
+                                        // Completion is read-only and one-shot. No Room call
+                                        // or document mutation is reachable from this adapter.
+                                        val sweep = pending?.buffer?.finish(pending.pageId)
+                                        if (sweep != null) {
+                                            latestOnEraserSweepCaptured(
+                                                sweep.pageId,
+                                                sweep.pointsPageDu.map { DuPoint(it.x, it.y) },
+                                                sweep.radiusPageDu,
+                                            )
+                                        }
+                                        return@forEach
+                                    }
+
                                     val completed = capture.finish(
                                         effect.stroke.pointerId
                                     )
@@ -478,6 +547,7 @@ fun ContinuousPageViewport(
 
 
                             is EditorGestureOwnership.Effect.Cancelled -> {
+                                eraser.cancel()
                                 capture.cancel()
                                 drawingPointerId = null
                                 livePenPreview = null
@@ -489,6 +559,24 @@ fun ContinuousPageViewport(
 
                 fun appendFromPointer(change: PointerInputChange) {
                     if (drawingPointerId != change.id.value) return
+
+                    if (selectedTool == EditorInkTool.ERASER) {
+                        val current = session?.takeIf {
+                            it.layout == layout &&
+                                it.viewport == viewportPx &&
+                                it.gutterPx == gutterPx
+                        }
+                        val appended = current != null && eraser.append(
+                            pointerId = change.id.value,
+                            pointPx = PxPoint(
+                                change.position.x.toDouble(),
+                                change.position.y.toDouble(),
+                            ),
+                            frame = eraserFrame(current.transform),
+                        )
+                        if (!appended) processEffects(owner.onConfigurationChanged())
+                        return
+                    }
 
                     val current = capture.preview ?: return
 
@@ -788,7 +876,13 @@ fun ContinuousPageViewport(
                                         }
                                     }
 
-                                    processEffects(owner.onUp(change.id.value))
+                                    processEffects(
+                                        owner.onUp(change.id.value),
+                                        releasePoint = PxPoint(
+                                            change.position.x.toDouble(),
+                                            change.position.y.toDouble(),
+                                        ),
+                                    )
 
                                     if (change.id.value == tapPointerId) {
                                         tapPointerId = null
@@ -810,6 +904,7 @@ fun ContinuousPageViewport(
                     }
                 } finally {
                     processEffects(owner.cancelAll())
+                    eraser.cancel()
                     capture.cancel()
                     drawingPointerId = null
                     livePenPreview = null
