@@ -21,6 +21,9 @@ import com.notebook.app.data.library.repository.NoteRepository
 import com.notebook.app.ui.editor.NoteAutosaveCoordinator
 import com.notebook.app.ui.editor.EraserSessionCommitResult
 import com.notebook.app.ui.editor.NoteEditorEraserToolbarPolicy
+import com.notebook.app.ui.editor.NoteEditorEraserMode
+import com.notebook.app.ui.editor.NoteEditorWholeStrokeEraser
+import com.notebook.app.ui.editor.WholeStrokeEraserGestureResult
 import com.notebook.app.ui.editor.NoteEditorPartialStrokeEraser
 import com.notebook.app.ui.editor.PartialStrokeEraserGestureResult
 import com.notebook.app.ui.editor.SavePhase
@@ -79,6 +82,9 @@ fun NoteEditorScreen(
     }
     var selectedTool by rememberSaveable(noteId) {
         mutableStateOf(EditorInkTool.PEN)
+    }
+    var eraserMode by rememberSaveable(noteId) {
+        mutableStateOf(NoteEditorEraserMode.PARTIAL)
     }
     var penInputError by remember(noteId) {
         mutableStateOf<String?>(null)
@@ -398,8 +404,24 @@ fun NoteEditorScreen(
             }
 
             if (selectedTool == EditorInkTool.ERASER) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    NoteEditorEraserMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = eraserMode == mode,
+                            enabled = eraserUiReady,
+                            onClick = { eraserMode = mode },
+                            label = { Text(mode.label) },
+                        )
+                    }
+                }
                 Text(
-                    "Partial eraser selected. Stylus erases; enable finger input " +
+                    "${eraserMode.label} selected. Stylus erases; enable finger input " +
                         "to erase with touch. Changes can be undone while this " +
                         "editing session remains open.",
                     modifier = Modifier.padding(horizontal = 12.dp),
@@ -636,6 +658,7 @@ fun NoteEditorScreen(
                         documentKey = noteId,
                         fingerWritingPreview = fingerWritingPreview,
                         selectedTool = selectedTool,
+                        eraserModeKey = eraserMode.name,
                         onPenStrokeCompleted = { pageId, envelopeJson ->
                             // Keep the existing 2C-2 autosave callback unchanged.
                             val activeCoordinator = coordinator
@@ -661,6 +684,7 @@ fun NoteEditorScreen(
                         onEraserSweepCaptured = { pageId, pointsPageDu, radiusPageDu ->
                             val activeCoordinator = coordinator
                             val renderedAtRelease = content
+                            val modeAtRelease = eraserMode
                             if (activeCoordinator == null || renderedAtRelease == null) {
                                 eraserInputError = "Eraser unavailable: editor session not ready"
                             } else {
@@ -669,26 +693,52 @@ fun NoteEditorScreen(
                                 val finishedPoints = pointsPageDu.toList()
                                 scope.launch {
                                     try {
-                                        val result = NoteEditorPartialStrokeEraser(
-                                            noteId = noteId,
-                                            repository = documentRepository,
-                                            coordinator = activeCoordinator,
-                                        ).submitViewportSweep(
-                                            renderedSnapshot = renderedAtRelease,
-                                            pageId = pageId,
-                                            pointsPageDu = finishedPoints,
-                                            radiusPageDu = radiusPageDu,
-                                        )
-                                        eraserInputError = when (result) {
-                                            is PartialStrokeEraserGestureResult.Committed,
-                                            PartialStrokeEraserGestureResult.NoHit -> null
-                                            is PartialStrokeEraserGestureResult.Blocked ->
-                                                "Eraser blocked: ${result.reason}"
-                                            is PartialStrokeEraserGestureResult.Rejected ->
-                                                "Eraser not applied: ${result.reason}"
-                                            is PartialStrokeEraserGestureResult.Unconfirmed ->
-                                                "Eraser save outcome uncertain. Reload the note " +
-                                                    "before performing more edits."
+                                        eraserInputError = when (modeAtRelease) {
+                                            NoteEditorEraserMode.PARTIAL -> {
+                                                when (val result = NoteEditorPartialStrokeEraser(
+                                                    noteId = noteId,
+                                                    repository = documentRepository,
+                                                    coordinator = activeCoordinator,
+                                                ).submitViewportSweep(
+                                                    renderedSnapshot = renderedAtRelease,
+                                                    pageId = pageId,
+                                                    pointsPageDu = finishedPoints,
+                                                    radiusPageDu = radiusPageDu,
+                                                )) {
+                                                    is PartialStrokeEraserGestureResult.Committed,
+                                                    PartialStrokeEraserGestureResult.NoHit -> null
+                                                    is PartialStrokeEraserGestureResult.Blocked ->
+                                                        "Eraser blocked: ${result.reason}"
+                                                    is PartialStrokeEraserGestureResult.Rejected ->
+                                                        "Eraser not applied: ${result.reason}"
+                                                    is PartialStrokeEraserGestureResult.Unconfirmed ->
+                                                        "Eraser save outcome uncertain. Reload the note " +
+                                                            "before performing more edits."
+                                                }
+                                            }
+                                            NoteEditorEraserMode.WHOLE_STROKE -> {
+                                                when (val result = NoteEditorWholeStrokeEraser(
+                                                    noteId = noteId,
+                                                    repository = documentRepository,
+                                                    coordinator = activeCoordinator,
+                                                ).submitViewportSweep(
+                                                    renderedSnapshot = renderedAtRelease,
+                                                    pageId = pageId,
+                                                    pointsPageDu = finishedPoints,
+                                                    radiusPageDu = radiusPageDu,
+                                                )) {
+                                                    is WholeStrokeEraserGestureResult.Committed,
+                                                    WholeStrokeEraserGestureResult.NoHit,
+                                                    WholeStrokeEraserGestureResult.Cancelled -> null
+                                                    is WholeStrokeEraserGestureResult.Blocked ->
+                                                        "Eraser blocked: ${result.reason}"
+                                                    is WholeStrokeEraserGestureResult.Rejected ->
+                                                        "Eraser not applied: ${result.reason}"
+                                                    is WholeStrokeEraserGestureResult.Unconfirmed ->
+                                                        "Eraser save outcome uncertain. Reload the note " +
+                                                            "before performing more edits."
+                                                }
+                                            }
                                         }
                                         // Existing save-state observer reloads the Room
                                         // snapshot only after a confirmed revision.

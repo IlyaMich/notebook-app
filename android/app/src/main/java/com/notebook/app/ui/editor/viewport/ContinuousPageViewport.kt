@@ -117,6 +117,7 @@ fun ContinuousPageViewport(
     storedPages: Map<String, StoredPage> = emptyMap(),
     fingerWritingPreview: Boolean = false,
     selectedTool: EditorInkTool = EditorInkTool.PEN,
+    eraserModeKey: String = "partial",
     onPenStrokeCompleted: (String, String) -> Unit = { _, _ -> },
     onPenStrokeError: (String) -> Unit = {},
     // A capture-only, non-destructive integration callback. The real editor
@@ -385,6 +386,7 @@ fun ContinuousPageViewport(
                 gutterPx,
                 fingerWritingPreview,
                 selectedTool,
+                eraserModeKey,
                 // A changed rendered snapshot invalidates an active eraser
                 // gesture; pen capture retains its original update behavior.
                 if (selectedTool == EditorInkTool.ERASER) storedPages else null,
