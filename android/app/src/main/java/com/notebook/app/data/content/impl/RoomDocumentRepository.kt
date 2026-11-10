@@ -60,6 +60,10 @@ class RoomDocumentRepository(
     ): DocumentCommit = db.withTransaction {
         val id = LibraryValidation.canonicalId(noteId)
         val note = db.noteDao().findById(id) ?: fail(LibraryErrorCode.NOT_FOUND, "Note not found")
+        if ((edit is DocumentEdit.ApplyPartialStrokeReplacements ||
+                edit is DocumentEdit.RestorePartialStrokeReplacements) && expectedRevision == null) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Partial eraser edits require a guarded commit")
+        }
         if (edit is DocumentEdit.RestoreRemovedStrokes && expectedRevision == null) {
             fail(LibraryErrorCode.INVALID_INPUT, "Stroke restoration requires a guarded commit")
         }
@@ -251,6 +255,16 @@ class RoomDocumentRepository(
             setElementOrder(db.elementDao().listByPage(page.id), originalOrder, revision)
             true
         }
+        is DocumentEdit.ApplyPartialStrokeReplacements ->
+            applyPartialStrokeReplacements(
+                ownedPage(pages, edit.pageId), edit.originalIdsInOrder,
+                edit.resultingIdsInOrder, edit.replacements, undo = false, revision = revision,
+            )
+        is DocumentEdit.RestorePartialStrokeReplacements ->
+            applyPartialStrokeReplacements(
+                ownedPage(pages, edit.pageId), edit.originalIdsInOrder,
+                edit.resultingIdsInOrder, edit.replacements, undo = true, revision = revision,
+            )
         is DocumentEdit.ReorderElements -> {
             val page = ownedPage(pages, edit.pageId)
             val existing = elementsFor(page.id)
@@ -294,6 +308,134 @@ class RoomDocumentRepository(
                 true
             }
         }
+    }
+
+    /**
+     * Atomic, reversible, exact-byte partial-stroke replacement. One transaction
+     * owns preflight, deletions, inserts, and ordering. The same envelope pairs
+     * are used in both directions, so redo does not allocate replacement IDs.
+     *
+     * A caller cannot use this as arbitrary reordering or arbitrary brush editing:
+     * every source is an unlocked canonical stroke and each generated fragment
+     * has the same brush and affine transform (and remains unlocked).
+     */
+    private suspend fun applyPartialStrokeReplacements(
+        page: PageEntity,
+        originalOrder: List<String>,
+        resultingOrder: List<String>,
+        replacements: List<DocumentEdit.PartialStrokeReplacement>,
+        undo: Boolean,
+        revision: Long,
+    ): Boolean {
+        if (replacements.isEmpty() || replacements.size > 8192 ||
+            replacements.sumOf { it.fragmentEnvelopes.size.toLong() } > 8192L
+        ) fail(LibraryErrorCode.INVALID_INPUT, "Invalid partial eraser replacement count")
+        val existing = elementsFor(page.id)
+        val originals = originalOrder.map(LibraryValidation::canonicalId)
+        val result = resultingOrder.map(LibraryValidation::canonicalId)
+        uniqueIds(originals)
+        uniqueIds(result)
+        val expected = if (undo) result else originals
+        val desired = if (undo) originals else result
+        if (existing.map { it.id } != expected) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Page order differs from partial eraser snapshot")
+        }
+
+        val removedSources = replacements.map { entry ->
+            val (id, kind) = CanonicalContentValidator.element(entry.originalEnvelope)
+            if (kind != "stroke") fail(LibraryErrorCode.INVALID_INPUT, "Partial eraser source is not stroke")
+            val original = ElementEntity(id, page.id, 0L, kind, entry.originalEnvelope, revision)
+            if (isLocked(original)) fail(LibraryErrorCode.PROTECTED_ENTITY, "Locked stroke cannot be split")
+            original
+        }
+        val generated = replacements.map { entry ->
+            entry.fragmentEnvelopes.map { raw ->
+                val (id, kind) = CanonicalContentValidator.element(raw)
+                if (kind != "stroke") {
+                    fail(LibraryErrorCode.INVALID_INPUT, "Partial eraser fragment is not stroke")
+                }
+                val row = ElementEntity(id, page.id, 0L, kind, raw, revision)
+                if (isLocked(row)) fail(LibraryErrorCode.PROTECTED_ENTITY, "Locked eraser fragment")
+                row
+            }
+        }
+        val sourceIds = removedSources.map { it.id }
+        val generatedRows = generated.flatten()
+        val generatedIds = generatedRows.map { it.id }
+        uniqueIds(sourceIds + generatedIds)
+
+        // Fragments are not allowed to alter brush, transform or lock state.
+        // Check semantic JSON objects, not their textual formatting.
+        replacements.forEachIndexed { index, entry ->
+            val source = JSONObject(entry.originalEnvelope)
+            val sourceBrush = source.getJSONObject("payload").getJSONObject("brush")
+            val sourceTransform = source.getJSONArray("transform")
+            generated[index].forEach { row ->
+                val candidate = JSONObject(row.elementJson)
+                val brush = candidate.getJSONObject("payload").getJSONObject("brush")
+                val transform = candidate.getJSONArray("transform")
+                val sameBrush = brush.getString("kind") == sourceBrush.getString("kind") &&
+                    brush.getDouble("width") == sourceBrush.getDouble("width") &&
+                    brush.getString("color") == sourceBrush.getString("color") &&
+                    brush.getDouble("opacity") == sourceBrush.getDouble("opacity")
+                val sameTransform = (0 until 6).all { axis ->
+                    transform.getDouble(axis) == sourceTransform.getDouble(axis)
+                }
+                if (!sameBrush || !sameTransform) {
+                    fail(LibraryErrorCode.INVALID_INPUT, "Partial fragment changes brush or transform")
+                }
+            }
+        }
+
+        // Verify the entire claimed pre/post render orders, including survivors.
+        val originalSet = sourceIds.toSet()
+        val fragmentSet = generatedIds.toSet()
+        if (!originals.containsAll(sourceIds) || !result.containsAll(generatedIds) ||
+            originals.any { it in fragmentSet } || result.any { it in originalSet } ||
+            originals.filterNot { it in originalSet } != result.filterNot { it in fragmentSet }
+        ) fail(LibraryErrorCode.INVALID_INPUT, "Invalid partial eraser survivor order")
+        val expanding = originals.flatMap { id ->
+            val idx = sourceIds.indexOf(id)
+            if (idx < 0) listOf(id) else generated[idx].map { it.id }
+        }
+        if (expanding != result) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Fragments do not occupy original stroke positions")
+        }
+
+        val deleting = if (undo) generatedRows else removedSources
+        val inserting = if (undo) removedSources else generatedRows
+        val existingById = existing.associateBy { it.id }
+        for (row in deleting) {
+            val old = existingById[row.id] ?: fail(LibraryErrorCode.INVALID_INPUT, "Expected stroke is missing")
+            if (old.kind != "stroke" || old.elementJson != row.elementJson || isLocked(old)) {
+                fail(LibraryErrorCode.INVALID_INPUT, "Partial eraser source bytes have changed")
+            }
+        }
+        val deletingSet = deleting.map { it.id }.toSet()
+        if (expected.toSet() != (existing.map { it.id }.toSet()) ||
+            desired.size != existing.size - deleting.size + inserting.size
+        ) fail(LibraryErrorCode.INVALID_INPUT, "Inconsistent partial eraser snapshot")
+        for (row in inserting) {
+            // IDs are unique across the entire database, not merely this page.
+            if (db.elementDao().findById(row.id) != null) {
+                fail(LibraryErrorCode.INVALID_INPUT, "Partial eraser element ID collision")
+            }
+        }
+        rejectIndexedPageEdge(page.id)
+        rejectIndexedElementEdges(existing.filter { it.id in deletingSet })
+        deleting.forEach { check(db.elementDao().deleteById(it.id) == 1) }
+        val survivors = db.elementDao().listByPage(page.id)
+        // After deletion the surviving order indices can have holes. Place new
+        // rows beyond the greatest remaining index, then two-phase reorder.
+        val maxIndex = survivors.maxOfOrNull { it.orderIndex } ?: -1L
+        if (maxIndex > Long.MAX_VALUE - inserting.size - 1L) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Order index exhausted")
+        }
+        inserting.forEachIndexed { index, row ->
+            db.elementDao().insert(row.copy(orderIndex = maxIndex + 1L + index))
+        }
+        setElementOrder(db.elementDao().listByPage(page.id), desired, revision)
+        return true
     }
 
     /** A mismatched legacy index entry cannot be silently removed by an asset-free edit. */

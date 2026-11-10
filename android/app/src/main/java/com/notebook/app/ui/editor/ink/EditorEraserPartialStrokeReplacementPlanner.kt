@@ -1,5 +1,6 @@
 package com.notebook.app.ui.editor.ink
 
+import com.notebook.app.data.content.model.DocumentEdit
 import com.notebook.app.data.content.model.StoredElement
 import com.notebook.app.data.content.model.StoredNoteContent
 import com.notebook.app.data.content.model.StoredPage
@@ -39,6 +40,8 @@ internal object EditorEraserPartialStrokeReplacementPlanner {
         val originalElementIdsInOrder: List<String>,
         val resultingElementIdsInOrder: List<String>,
         val replacements: List<Replacement>,
+        val forwardEdit: DocumentEdit.ApplyPartialStrokeReplacements,
+        val inverseEdit: DocumentEdit.RestorePartialStrokeReplacements,
     )
 
     private data class Pending(
@@ -172,14 +175,27 @@ internal object EditorEraserPartialStrokeReplacementPlanner {
             byPosition[index]?.fragmentIds ?: listOf(element.id)
         }
         require(resultingOrder.size == resultingOrder.toSet().size)
+        val editReplacements = replacements.map { replacement ->
+            DocumentEdit.PartialStrokeReplacement(
+                replacement.original.envelopeJson,
+                replacement.fragmentEnvelopes,
+            )
+        }
+        val originalIds = ordered.map { it.id }
         return Plan(
             noteId = content.noteId,
             pageId = pageId,
             expectedNoteRevision = content.revision,
             expectedPageRevision = page.revision,
-            originalElementIdsInOrder = ordered.map { it.id },
+            originalElementIdsInOrder = originalIds,
             resultingElementIdsInOrder = resultingOrder,
             replacements = replacements,
+            forwardEdit = DocumentEdit.ApplyPartialStrokeReplacements(
+                page.id, originalIds, resultingOrder, editReplacements,
+            ),
+            inverseEdit = DocumentEdit.RestorePartialStrokeReplacements(
+                page.id, originalIds, resultingOrder, editReplacements,
+            ),
         )
     }
 

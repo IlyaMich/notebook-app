@@ -176,6 +176,27 @@ class EditorEraserPartialStrokeReplacementPlannerTest {
         }
     }
 
+    @Test fun producesExactForwardAndInverseCommandsWithoutChangingSource() {
+        val output = requireNotNull(plan())
+        val replacement = output.replacements.single()
+        val pair = com.notebook.app.data.content.model.DocumentEdit.PartialStrokeReplacement(
+            replacement.original.envelopeJson, replacement.fragmentEnvelopes,
+        )
+        assertEquals(
+            com.notebook.app.data.content.model.DocumentEdit.ApplyPartialStrokeReplacements(
+                "page-one", output.originalElementIdsInOrder,
+                output.resultingElementIdsInOrder, listOf(pair),
+            ), output.forwardEdit,
+        )
+        assertEquals(
+            com.notebook.app.data.content.model.DocumentEdit.RestorePartialStrokeReplacements(
+                "page-one", output.originalElementIdsInOrder,
+                output.resultingElementIdsInOrder, listOf(pair),
+            ), output.inverseEdit,
+        )
+        assertEquals(replacement.fragmentIds, output.resultingElementIdsInOrder)
+    }
+
     @Test fun doesNotModifySourceWhenPlanning() {
         val content = note()
         val before = content.pages.single().elements.single().envelopeJson

@@ -25,6 +25,28 @@ sealed interface DocumentEdit {
         val envelopes: List<String>,
         val idsInOrder: List<String>,
     ) : DocumentEdit
+    /** One affected original stroke and its zero-or-more newly-IDed fragments. */
+    data class PartialStrokeReplacement(
+        val originalEnvelope: String,
+        val fragmentEnvelopes: List<String>,
+    )
+    /**
+     * Atomic forward partial erase. The page order lists include ALL unaffected rows.
+     * Both forward and inverse require commitIfRevision; never submit via commit().
+     */
+    data class ApplyPartialStrokeReplacements(
+        val pageId: String,
+        val originalIdsInOrder: List<String>,
+        val resultingIdsInOrder: List<String>,
+        val replacements: List<PartialStrokeReplacement>,
+    ) : DocumentEdit
+    /** Restore exact original stroke bytes and remove exact generated fragments. */
+    data class RestorePartialStrokeReplacements(
+        val pageId: String,
+        val originalIdsInOrder: List<String>,
+        val resultingIdsInOrder: List<String>,
+        val replacements: List<PartialStrokeReplacement>,
+    ) : DocumentEdit
     data class ReorderElements(val pageId: String, val idsInOrder: List<String>) : DocumentEdit
     /** Cross-page transfer within one note preserves element IDs and their relative order. */
     data class TransferElements(
