@@ -45,6 +45,20 @@ internal class RegisteredFinalizedImageDecoder(
         source.withVerifiedBytes(assetId) { snapshot, bytes ->
             currentCoroutineContext().ensureActive()
             BoundedImageDecodePolicy.requireEncoded(snapshot.mimeType, bytes.size.toLong())
+            // I3 structural envelope checks run on the same digest-verified bytes
+            // that BitmapFactory will decode. In particular, do not trust a
+            // permissive native decoder to enforce PNG IEND / JPEG EOI or EOF.
+            StrictEncodedImageStructure.validate(snapshot.mimeType, bytes)
+            val inspectionContext = currentCoroutineContext()
+            when (snapshot.mimeType) {
+                "image/png" -> StrictPngInflateValidation.validate(bytes) {
+                    inspectionContext.ensureActive()
+                }
+                "image/jpeg" -> StrictBaselineJpegEntropy.validate(bytes) {
+                    inspectionContext.ensureActive()
+                }
+            }
+            currentCoroutineContext().ensureActive()
 
             val boundsOptions = BitmapFactory.Options().apply {
                 inJustDecodeBounds = true
