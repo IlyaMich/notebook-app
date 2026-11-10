@@ -19,6 +19,8 @@ import com.notebook.app.data.content.repository.DocumentRepository
 import com.notebook.app.data.library.model.Note
 import com.notebook.app.data.library.repository.NoteRepository
 import com.notebook.app.ui.editor.NoteAutosaveCoordinator
+import com.notebook.app.ui.editor.EraserSessionCommitResult
+import com.notebook.app.ui.editor.NoteEditorEraserToolbarPolicy
 import com.notebook.app.ui.editor.NoteEditorPartialStrokeEraser
 import com.notebook.app.ui.editor.PartialStrokeEraserGestureResult
 import com.notebook.app.ui.editor.SavePhase
@@ -135,6 +137,50 @@ fun NoteEditorScreen(
 
 
     val saveState = coordinator?.state?.collectAsState()?.value
+    val eraserHistoryState = coordinator?.eraserHistory?.collectAsState()?.value
+    val eraserUiReady = NoteEditorEraserToolbarPolicy.canErase(
+        saveState, content?.revision,
+    )
+
+    fun performEraserHistoryAction(undo: Boolean) {
+        val active = coordinator ?: return
+        val isEligible = if (undo) {
+            NoteEditorEraserToolbarPolicy.canUndo(
+                active.state.value, content?.revision, active.eraserHistory.value,
+            )
+        } else {
+            NoteEditorEraserToolbarPolicy.canRedo(
+                active.state.value, content?.revision, active.eraserHistory.value,
+            )
+        }
+        if (!isEligible) {
+            eraserInputError = "Eraser history unavailable until the preview is current and saved"
+            return
+        }
+        scope.launch {
+            try {
+                val outcome = if (undo) {
+                    active.undoEraserEdit().await()
+                } else {
+                    active.redoEraserEdit().await()
+                }
+                eraserInputError = when (outcome) {
+                    is EraserSessionCommitResult.Committed -> null
+                    is EraserSessionCommitResult.Rejected ->
+                        "Eraser history not applied: ${outcome.reason}"
+                    is EraserSessionCommitResult.Unconfirmed ->
+                        "Eraser history save outcome uncertain. Reload the note " +
+                            "before performing more edits."
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                eraserInputError =
+                    "Could not confirm eraser history outcome. Reload the note " +
+                        "before performing more edits."
+            }
+        }
+    }
 
     suspend fun reloadPreview() {
         try {
@@ -287,9 +333,9 @@ fun NoteEditorScreen(
                     .padding(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                // ERASER is not yet a user-facing control: partial erase and
-                // failure-recovery UI are still outstanding in EDT-16.
-                EditorInkTool.entries.filter { it != EditorInkTool.ERASER }.forEach { tool ->
+                // EDT-16 1E-7A: partial-stroke erase is the default eraser mode.
+                // The coordinator and Room still enforce admission and revision guards.
+                EditorInkTool.entries.forEach { tool ->
                     val label = when (tool) {
                         EditorInkTool.PEN -> "Pen"
                         EditorInkTool.PENCIL -> "Pencil"
@@ -299,6 +345,7 @@ fun NoteEditorScreen(
 
                     FilterChip(
                         selected = selectedTool == tool,
+                        enabled = tool != EditorInkTool.ERASER || eraserUiReady,
                         onClick = {
                             selectedTool = tool
                         },
@@ -310,7 +357,6 @@ fun NoteEditorScreen(
 
                 // The remaining editor tools are not implemented yet.
                 listOf(
-                    "Eraser",
                     "Lasso",
                     "Shapes",
                     "Text",
@@ -336,11 +382,47 @@ fun NoteEditorScreen(
             ) {
                 Text(
                     if (fingerWritingPreview) {
-                        "Finger Pen mode: ON (autosaved)"
+                        if (selectedTool == EditorInkTool.ERASER) {
+                            "Finger eraser mode: ON"
+                        } else {
+                            "Finger Pen mode: ON (autosaved)"
+                        }
                     } else {
-                        "Enable finger Pen writing"
+                        if (selectedTool == EditorInkTool.ERASER) {
+                            "Enable finger erasing"
+                        } else {
+                            "Enable finger Pen writing"
+                        }
                     }
                 )
+            }
+
+            if (selectedTool == EditorInkTool.ERASER) {
+                Text(
+                    "Partial eraser selected. Stylus erases; enable finger input " +
+                        "to erase with touch. Changes can be undone while this " +
+                        "editing session remains open.",
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+
+            Row(
+                modifier = Modifier.padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                TextButton(
+                    enabled = NoteEditorEraserToolbarPolicy.canUndo(
+                        saveState, content?.revision, eraserHistoryState,
+                    ),
+                    onClick = { performEraserHistoryAction(undo = true) },
+                ) { Text("Undo eraser") }
+                TextButton(
+                    enabled = NoteEditorEraserToolbarPolicy.canRedo(
+                        saveState, content?.revision, eraserHistoryState,
+                    ),
+                    onClick = { performEraserHistoryAction(undo = false) },
+                ) { Text("Redo eraser") }
             }
 
             when {
@@ -574,9 +656,8 @@ fun NoteEditorScreen(
                         onPenStrokeError = { message ->
                             penInputError = message
                         },
-                        // EDT-16 1E-6: completion-only PARTIAL eraser pipeline. This callback
-                        // is unreachable from the regular toolbar until the
-                        // eraser has passed failure/undo/partial-mode gates.
+                        // EDT-16 1E-7A: the toolbar now exposes PARTIAL erasing.
+                        // The service and coordinator still reject stale/unsafe actions.
                         onEraserSweepCaptured = { pageId, pointsPageDu, radiusPageDu ->
                             val activeCoordinator = coordinator
                             val renderedAtRelease = content
