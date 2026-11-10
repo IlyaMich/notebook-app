@@ -19,6 +19,8 @@ import com.notebook.app.data.content.repository.DocumentRepository
 import com.notebook.app.data.library.model.Note
 import com.notebook.app.data.library.repository.NoteRepository
 import com.notebook.app.ui.editor.NoteAutosaveCoordinator
+import com.notebook.app.ui.editor.NoteEditorWholeStrokeEraser
+import com.notebook.app.ui.editor.WholeStrokeEraserGestureResult
 import com.notebook.app.ui.editor.SavePhase
 import com.notebook.app.ui.editor.SaveRetryResult
 import kotlinx.coroutines.launch
@@ -77,6 +79,9 @@ fun NoteEditorScreen(
         mutableStateOf(EditorInkTool.PEN)
     }
     var penInputError by remember(noteId) {
+        mutableStateOf<String?>(null)
+    }
+    var eraserInputError by remember(noteId) {
         mutableStateOf<String?>(null)
     }
 
@@ -389,6 +394,13 @@ fun NoteEditorScreen(
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
+                        if (eraserInputError != null) {
+                            Text(
+                                text = eraserInputError.orEmpty(),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
 
                         if (previewWarning != null) {
                             Text(
@@ -561,6 +573,54 @@ fun NoteEditorScreen(
                         },
                         onPenStrokeError = { message ->
                             penInputError = message
+                        },
+                        // EDT-16 1D-5: completion-only pipeline. This callback
+                        // is unreachable from the regular toolbar until the
+                        // eraser has passed failure/undo/partial-mode gates.
+                        onEraserSweepCaptured = { pageId, pointsPageDu, radiusPageDu ->
+                            val activeCoordinator = coordinator
+                            val renderedAtRelease = content
+                            if (activeCoordinator == null || renderedAtRelease == null) {
+                                eraserInputError = "Eraser unavailable: editor session not ready"
+                            } else {
+                                // Freeze page coordinates and the visible note revision
+                                // before launching any asynchronous work.
+                                val finishedPoints = pointsPageDu.toList()
+                                scope.launch {
+                                    try {
+                                        val result = NoteEditorWholeStrokeEraser(
+                                            noteId = noteId,
+                                            repository = documentRepository,
+                                            coordinator = activeCoordinator,
+                                        ).submitViewportSweep(
+                                            renderedSnapshot = renderedAtRelease,
+                                            pageId = pageId,
+                                            pointsPageDu = finishedPoints,
+                                            radiusPageDu = radiusPageDu,
+                                        )
+                                        eraserInputError = when (result) {
+                                            is WholeStrokeEraserGestureResult.Committed,
+                                            WholeStrokeEraserGestureResult.NoHit,
+                                            WholeStrokeEraserGestureResult.Cancelled -> null
+                                            is WholeStrokeEraserGestureResult.Blocked ->
+                                                "Eraser blocked: ${result.reason}"
+                                            is WholeStrokeEraserGestureResult.Rejected ->
+                                                "Eraser not applied: ${result.reason}"
+                                            is WholeStrokeEraserGestureResult.Unconfirmed ->
+                                                "Eraser save outcome uncertain. Reload the note " +
+                                                    "before performing more edits."
+                                        }
+                                        // Existing save-state observer reloads the Room
+                                        // snapshot only after a confirmed revision.
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
+                                    } catch (failure: Exception) {
+                                        eraserInputError =
+                                            "Could not confirm eraser outcome. Reload the note " +
+                                                "before performing more edits."
+                                    }
+                                }
+                            }
                         },
                         modifier = Modifier
                             .fillMaxWidth()

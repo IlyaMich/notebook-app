@@ -385,6 +385,9 @@ fun ContinuousPageViewport(
                 gutterPx,
                 fingerWritingPreview,
                 selectedTool,
+                // A changed rendered snapshot invalidates an active eraser
+                // gesture; pen capture retains its original update behavior.
+                if (selectedTool == EditorInkTool.ERASER) storedPages else null,
                 lifecycleOwner,
                 inputSessionGeneration,
                 inputResumed,
