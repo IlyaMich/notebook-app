@@ -41,7 +41,19 @@ internal class RegisteredFinalizedImageDecoder(
 ) {
     private val source = RegisteredFinalizedImageBytesReader(privateFilesDir, assetDao)
 
-    suspend fun inspect(assetId: String): VerifiedDecodedImageInfo = withContext(Dispatchers.IO) {
+    suspend fun inspect(assetId: String): VerifiedDecodedImageInfo =
+        withInspectedAssetLease(assetId) { it }
+
+    /**
+     * C2C-3C-I1: retain the existing acquisition lease until [action] completes.
+     * The callback receives verified metadata only, never raw bytes or a bitmap.
+     * Do not reacquire the non-reentrant lease or invoke an asset publisher in [action].
+     * This method does NOT authorize an attachment or change ownership state.
+     */
+    suspend fun <T> withInspectedAssetLease(
+        assetId: String,
+        action: suspend (VerifiedDecodedImageInfo) -> T,
+    ): T = withContext(Dispatchers.IO) {
         source.withVerifiedBytes(assetId) { snapshot, bytes ->
             currentCoroutineContext().ensureActive()
             BoundedImageDecodePolicy.requireEncoded(snapshot.mimeType, bytes.size.toLong())
@@ -90,7 +102,7 @@ internal class RegisteredFinalizedImageDecoder(
                 inBitmap = null
             }
             var bitmap: Bitmap? = null
-            try {
+            val info = try {
                 bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions)
                     ?: throw IOException("Full image decode failed")
                 // Full decode is synchronous and cannot be assumed to stop mid-call.
@@ -127,6 +139,10 @@ internal class RegisteredFinalizedImageDecoder(
             } finally {
                 bitmap?.recycle()
             }
+            // The decoded bitmap is gone before suspending; the acquisition lease
+            // and verified byte buffer remain scoped until the callback returns.
+            currentCoroutineContext().ensureActive()
+            action(info)
         }
     }
 }
