@@ -19,8 +19,8 @@ import com.notebook.app.data.content.repository.DocumentRepository
 import com.notebook.app.data.library.model.Note
 import com.notebook.app.data.library.repository.NoteRepository
 import com.notebook.app.ui.editor.NoteAutosaveCoordinator
-import com.notebook.app.ui.editor.NoteEditorWholeStrokeEraser
-import com.notebook.app.ui.editor.WholeStrokeEraserGestureResult
+import com.notebook.app.ui.editor.NoteEditorPartialStrokeEraser
+import com.notebook.app.ui.editor.PartialStrokeEraserGestureResult
 import com.notebook.app.ui.editor.SavePhase
 import com.notebook.app.ui.editor.SaveRetryResult
 import kotlinx.coroutines.launch
@@ -574,7 +574,7 @@ fun NoteEditorScreen(
                         onPenStrokeError = { message ->
                             penInputError = message
                         },
-                        // EDT-16 1D-5: completion-only pipeline. This callback
+                        // EDT-16 1E-6: completion-only PARTIAL eraser pipeline. This callback
                         // is unreachable from the regular toolbar until the
                         // eraser has passed failure/undo/partial-mode gates.
                         onEraserSweepCaptured = { pageId, pointsPageDu, radiusPageDu ->
@@ -588,7 +588,7 @@ fun NoteEditorScreen(
                                 val finishedPoints = pointsPageDu.toList()
                                 scope.launch {
                                     try {
-                                        val result = NoteEditorWholeStrokeEraser(
+                                        val result = NoteEditorPartialStrokeEraser(
                                             noteId = noteId,
                                             repository = documentRepository,
                                             coordinator = activeCoordinator,
@@ -599,14 +599,13 @@ fun NoteEditorScreen(
                                             radiusPageDu = radiusPageDu,
                                         )
                                         eraserInputError = when (result) {
-                                            is WholeStrokeEraserGestureResult.Committed,
-                                            WholeStrokeEraserGestureResult.NoHit,
-                                            WholeStrokeEraserGestureResult.Cancelled -> null
-                                            is WholeStrokeEraserGestureResult.Blocked ->
+                                            is PartialStrokeEraserGestureResult.Committed,
+                                            PartialStrokeEraserGestureResult.NoHit -> null
+                                            is PartialStrokeEraserGestureResult.Blocked ->
                                                 "Eraser blocked: ${result.reason}"
-                                            is WholeStrokeEraserGestureResult.Rejected ->
+                                            is PartialStrokeEraserGestureResult.Rejected ->
                                                 "Eraser not applied: ${result.reason}"
-                                            is WholeStrokeEraserGestureResult.Unconfirmed ->
+                                            is PartialStrokeEraserGestureResult.Unconfirmed ->
                                                 "Eraser save outcome uncertain. Reload the note " +
                                                     "before performing more edits."
                                         }
