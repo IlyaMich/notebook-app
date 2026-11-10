@@ -3,6 +3,7 @@ package com.notebook.app.ui.editor
 import com.notebook.app.data.content.model.DocumentEdit
 import com.notebook.app.data.content.repository.DocumentRepository
 import com.notebook.app.ui.editor.ink.EditorEraserWholeStrokeRemovalPlanner
+import com.notebook.app.ui.editor.ink.EditorEraserPartialStrokeReplacementPlanner
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -53,8 +54,8 @@ class NoteAutosaveCoordinator(
     initialRevision: Long,
 ) {
     private data class EraserHistoryEntry(
-        val forward: DocumentEdit.RemoveElements,
-        val inverse: DocumentEdit.RestoreRemovedStrokes,
+        val forward: DocumentEdit,
+        val inverse: DocumentEdit,
     )
 
     private sealed interface HistoryTransition {
@@ -109,7 +110,9 @@ class NoteAutosaveCoordinator(
     fun enqueue(edit: DocumentEdit) {
         // Eraser restoration must never enter the unguarded autosave path.
         require(edit !is DocumentEdit.RestoreRemovedStrokes &&
-            edit !is DocumentEdit.RemoveElements) {
+            edit !is DocumentEdit.RemoveElements &&
+            edit !is DocumentEdit.ApplyPartialStrokeReplacements &&
+            edit !is DocumentEdit.RestorePartialStrokeReplacements) {
             "Stroke removal/restoration requires a guarded eraser session command"
         }
         val startWorker = synchronized(lock) {
@@ -178,6 +181,115 @@ class NoteAutosaveCoordinator(
         if (accepted) launchDrain()
         return acknowledgement
     }
+
+    /**
+     * Admit one fully planned partial-stroke replacement as a single guarded
+     * transaction. Both partial and whole erasing share the same session history:
+     * undo is chronological across modes and never bypasses autosave.
+     *
+     * The caller must supply a plan from a fresh, complete document snapshot.
+     * This method checks the plan structure before entering the queue; Room
+     * remains authoritative about source envelopes and element ownership.
+     */
+    internal fun submitPartialStrokeReplacement(
+        plan: EditorEraserPartialStrokeReplacementPlanner.Plan,
+    ): Deferred<EraserSessionCommitResult> {
+        require(plan.noteId == noteId && plan.pageId.isNotBlank()) {
+            "Partial eraser plan belongs to another note or page"
+        }
+        require(plan.expectedNoteRevision >= 0L &&
+            plan.expectedNoteRevision < Long.MAX_VALUE &&
+            plan.replacements.isNotEmpty()) {
+            "Invalid partial eraser revision or empty replacement plan"
+        }
+        val forward = plan.forwardEdit
+        val inverse = plan.inverseEdit
+        val originals = plan.originalElementIdsInOrder
+        val resulting = plan.resultingElementIdsInOrder
+        require(forward.pageId == plan.pageId && inverse.pageId == plan.pageId &&
+            forward.originalIdsInOrder == originals && inverse.originalIdsInOrder == originals &&
+            forward.resultingIdsInOrder == resulting && inverse.resultingIdsInOrder == resulting &&
+            forward.replacements == inverse.replacements &&
+            originals.size == originals.toSet().size &&
+            resulting.size == resulting.toSet().size) {
+            "Partial eraser plan has inconsistent forward/inverse ordering"
+        }
+
+        val ordered = plan.replacements.sortedBy { it.originalPosition }
+        require(ordered == plan.replacements &&
+            ordered.map { it.originalPosition }.distinct().size == ordered.size &&
+            ordered.all { it.originalPosition in originals.indices } &&
+            ordered.all { originals[it.originalPosition] == it.original.id } &&
+            ordered.all { it.original.kind == "stroke" } &&
+            ordered.all { it.fragmentIds.size == it.fragmentEnvelopes.size } &&
+            ordered.flatMap { it.fragmentIds }.let { it.size == it.toSet().size } &&
+            ordered.map { it.original.id }.let { it.size == it.toSet().size }) {
+            "Partial eraser plan has invalid source positions or fragments"
+        }
+        val byPosition = ordered.associateBy { it.originalPosition }
+        val expectedOrder = originals.flatMapIndexed { index, id ->
+            byPosition[index]?.fragmentIds ?: listOf(id)
+        }
+        require(resulting == expectedOrder &&
+            ordered.none { replacement -> replacement.fragmentIds.any { it in originals } }) {
+            "Partial eraser resulting order does not match replacements"
+        }
+        // Compare the complete serialized command snapshots. Never accept a
+        // hand-built inverse that differs from the fragments used for forward.
+        val expectedReplacements = ordered.map {
+            DocumentEdit.PartialStrokeReplacement(
+                it.original.envelopeJson,
+                it.fragmentEnvelopes,
+            )
+        }
+        require(forward.replacements == expectedReplacements) {
+            "Partial eraser command does not match its original snapshots"
+        }
+        // Freeze nested lists before asynchronous worker admission; callers
+        // must not be able to alter a queued edit through mutable List aliases.
+        val frozen = expectedReplacements.map { it.copy(
+            fragmentEnvelopes = it.fragmentEnvelopes.toList(),
+        ) }
+        val frozenOriginal = originals.toList()
+        val frozenResult = resulting.toList()
+        val entry = EraserHistoryEntry(
+            forward = DocumentEdit.ApplyPartialStrokeReplacements(
+                plan.pageId, frozenOriginal, frozenResult, frozen,
+            ),
+            inverse = DocumentEdit.RestorePartialStrokeReplacements(
+                plan.pageId, frozenOriginal, frozenResult, frozen,
+            ),
+        )
+        val acknowledgement = CompletableDeferred<EraserSessionCommitResult>()
+        val accepted = synchronized(lock) {
+            if (!scope.isActive) {
+                acknowledgement.complete(EraserSessionCommitResult.Rejected("Editor session is closed"))
+                false
+            } else if (!idleForGuardedEdit()) {
+                acknowledgement.complete(EraserSessionCommitResult.Rejected("Autosave is not idle"))
+                false
+            } else if (tracker.state.committedRevision != plan.expectedNoteRevision) {
+                acknowledgement.complete(EraserSessionCommitResult.Rejected("Partial eraser snapshot is stale"))
+                false
+            } else {
+                admitGuarded(
+                    edit = entry.forward,
+                    expectedRevision = plan.expectedNoteRevision,
+                    transition = HistoryTransition.Remove(entry, historyEpoch),
+                    acknowledgement = acknowledgement,
+                )
+                true
+            }
+        }
+        if (accepted) launchDrain()
+        return acknowledgement
+    }
+
+    /** Undo the latest *confirmed* eraser edit, whether whole or partial. */
+    fun undoEraserEdit(): Deferred<EraserSessionCommitResult> = submitHistoryAction(undo = true)
+
+    /** Redo the latest confirmed eraser undo, preserving generated fragment IDs. */
+    fun redoEraserEdit(): Deferred<EraserSessionCommitResult> = submitHistoryAction(undo = false)
 
     /** Only the most recent successfully committed eraser action can be undone. */
     fun undoWholeStroke(): Deferred<EraserSessionCommitResult> = submitHistoryAction(undo = true)
