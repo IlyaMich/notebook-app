@@ -11,17 +11,14 @@ import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
 /**
- * EDT-16 1E-1: read-only, bounded partial-erase geometry for an IDENTITY-transform
- * canonical stroke whose entire painted footprint is inside its owning page.
+ * EDT-16 1E-2: read-only, bounded partial-stroke splitting in element-local DU.
  *
- * The renderer paints a constant-width polyline with round caps/joins. In this
- * restricted case, removing points whose distance to the swept eraser path is
- * <= eraserRadius + strokeWidth/2 leaves each retained fragment's round cap
- * outside the eraser's painted disk (apart from boundary tangency).
- *
- * This is deliberately NOT a persistence command or general-affine splitter.
- * Unsupported transforms, page-clipped strokes and ambiguous geometry fail
- * closed; later checkpoints must add those cases before enabling partial erase.
+ * Similarity transforms are handled exactly as round page-space capsules.
+ * General affine brush footprints are handled using a conservative inner/outer
+ * Minkowski approximation; ambiguous, excessively approximate, or costly cases
+ * fail closed. Page-clipped source strokes may be split only when the eraser's
+ * entire swept disk stays within the owning page, proving every contact is
+ * actually visible. No edit command, JSON rewrite, or persistence is performed.
  */
 internal object EditorEraserPartialStrokeGeometry {
     sealed interface Result {
@@ -38,7 +35,7 @@ internal object EditorEraserPartialStrokeGeometry {
     private const val MAX_FRAGMENTS = 8192
     private const val PARAM_EPS = 1.0e-10
     private const val MIN_FRAGMENT_LENGTH_DU = 1.0e-7
-    private val IDENTITY = listOf(1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    private const val MAX_AFFINE_OVERLAPS = 4096L
 
     /** Caller must pass the actual owning page dimensions in DU. */
     fun split(
@@ -63,25 +60,68 @@ internal object EditorEraserPartialStrokeGeometry {
         if (stroke.locked || eraserPointsPageDu.isEmpty() ||
             (stroke.brush.opacity * 255.0).roundToInt() == 0
         ) return Result.Unchanged
-        if (stroke.elementTransform.coefficients() != IDENTITY) {
-            return Result.Unresolved("Non-identity element transform requires affine splitting")
+        val coefficients = stroke.elementTransform.coefficients()
+        if (coefficients.size != 6 || coefficients.any { !it.isFinite() }) {
+            return Result.Unresolved("Invalid affine element transform")
         }
-        val radius = eraserRadiusPageDu + stroke.brush.widthDu / 2.0
+        val a = coefficients[0]
+        val b = coefficients[1]
+        val c = coefficients[2]
+        val d = coefficients[3]
+        val tx = coefficients[4]
+        val ty = coefficients[5]
+        val columnX = hypot(a, b)
+        val columnY = hypot(c, d)
+        if (!columnX.isFinite() || !columnY.isFinite() ||
+            columnX <= 0.0 || columnY <= 0.0
+        ) return Result.Unresolved("Degenerate affine transform")
+        val normalizedDet = (a / columnX) * (d / columnY) -
+            (b / columnX) * (c / columnY)
+        if (!normalizedDet.isFinite() || abs(normalizedDet) < 1.0e-12) {
+            return Result.Unresolved("Numerically unstable affine transform")
+        }
+        val maxScale = max(columnX, columnY)
+        val similar = abs(columnX - columnY) <= 1.0e-12 * maxScale &&
+            abs(a * c + b * d) <= 1.0e-12 * maxScale * maxScale
+        val brushRadius = stroke.brush.widthDu / 2.0
+        val broadRadius = eraserRadiusPageDu + brushRadius * maxScale
+        val exactRadius = eraserRadiusPageDu + brushRadius * columnX
+        val radius = if (similar) exactRadius else broadRadius
         if (!radius.isFinite() || radius <= 0.0 ||
             pageWidthDu > MAX_ABS_COORDINATE || pageHeightDu > MAX_ABS_COORDINATE ||
             radius > MAX_ABS_COORDINATE ||
             stroke.samples.size > MAX_SAMPLES || eraserPointsPageDu.size > MAX_SAMPLES
         ) return Result.Unresolved("Geometry exceeds bounded splitter limits")
-        val halfWidth = stroke.brush.widthDu / 2.0
-        // For a straight polyline inside a convex rectangle, checking all
-        // vertices suffices to bound the entire round-capped painted stroke.
-        if (stroke.samples.any { s ->
-                abs(s.xDu) > MAX_ABS_COORDINATE || abs(s.yDu) > MAX_ABS_COORDINATE ||
-                    s.xDu - halfWidth <= 0.0 || s.yDu - halfWidth <= 0.0 ||
-                    s.xDu + halfWidth >= pageWidthDu ||
-                    s.yDu + halfWidth >= pageHeightDu
+        val transformed = stroke.samples.map { point ->
+            Point(a * point.xDu + c * point.yDu + tx,
+                b * point.xDu + d * point.yDu + ty)
+        }
+        if (transformed.any { !it.x.isFinite() || !it.y.isFinite() ||
+                abs(it.x) > MAX_ABS_COORDINATE || abs(it.y) > MAX_ABS_COORDINATE
+            } || stroke.samples.any {
+                abs(it.xDu) > MAX_ABS_COORDINATE || abs(it.yDu) > MAX_ABS_COORDINATE
             }
-        ) return Result.Unresolved("Stroke footprint intersects the page clip")
+        ) return Result.Unresolved("Transformed stroke exceeds safe coordinate range")
+
+        val extentX = brushRadius * hypot(a, c)
+        val extentY = brushRadius * hypot(b, d)
+        if (!extentX.isFinite() || !extentY.isFinite()) {
+            return Result.Unresolved("Invalid painted brush extent")
+        }
+        val intersectsPageClip = transformed.any { point ->
+            point.x - extentX <= 0.0 || point.x + extentX >= pageWidthDu ||
+                point.y - extentY <= 0.0 || point.y + extentY >= pageHeightDu
+        }
+        // For page-clipped strokes, a contact is certified visible only when
+        // the entire swept eraser disk lies inside the page. If the disk crosses
+        // the clip, unbounded brush/capsule overlap is not enough to authorize
+        // cutting visible ink. No-hit remains safe to return unchanged.
+        val sweepDiskInsidePage = eraserPointsPageDu.all { point ->
+            point.x - eraserRadiusPageDu >= 0.0 &&
+                point.y - eraserRadiusPageDu >= 0.0 &&
+                point.x + eraserRadiusPageDu <= pageWidthDu &&
+                point.y + eraserRadiusPageDu <= pageHeightDu
+        }
         if (eraserPointsPageDu.any {
                 abs(it.x) > MAX_ABS_COORDINATE || abs(it.y) > MAX_ABS_COORDINATE ||
                     it.x < 0.0 || it.y < 0.0 ||
@@ -98,36 +138,58 @@ internal object EditorEraserPartialStrokeGeometry {
         if (radius <= tolerance) {
             return Result.Unresolved("Eraser radius is below numeric tolerance")
         }
-        val radiusSq = radius * radius
+        val affineSolver = if (similar) null else EditorEraserAffinePartialIntervals(
+            a = a, b = b, c = c, d = d,
+            brushRadius = brushRadius, eraserRadius = eraserRadiusPageDu,
+        )
         val removed = ArrayList<Range>()
+        var affineOverlapCount = 0L
         for (i in 0 until strokeSegmentCount) {
-            val first = stroke.samples[i]
-            val second = stroke.samples[min(i + 1, stroke.samples.lastIndex)]
-            val a = Point(first.xDu, first.yDu)
-            val b = Point(second.xDu, second.yDu)
+            val first = transformed[i]
+            val second = transformed[min(i + 1, transformed.lastIndex)]
             for (j in 0 until eraserSegmentCount) {
-                val c = eraserPointsPageDu[j]
-                val d = eraserPointsPageDu[min(j + 1, eraserPointsPageDu.lastIndex)]
-                if (disjointBounds(a, b, c, d, radius + tolerance)) continue
-                // Compare a slightly expanded and contracted capsule. A barely
-                // touching pair cannot silently become a confirmed miss/hit
-                // because of floating-point rounding.
-                val expanded = capsuleIntervals(
-                    a, b, c, d, radius + tolerance, (radius + tolerance) * (radius + tolerance)
-                ) ?: return Result.Unresolved("Numerically ambiguous expanded boundary")
-                if (expanded.isEmpty()) continue
-                val contracted = capsuleIntervals(
-                    a, b, c, d, radius - tolerance, (radius - tolerance) * (radius - tolerance)
-                ) ?: return Result.Unresolved("Numerically ambiguous contracted boundary")
-                if (contracted.isEmpty()) {
-                    return Result.Unresolved("Near-tangential eraser contact")
+                val eraserFirst = eraserPointsPageDu[j]
+                val eraserSecond = eraserPointsPageDu[min(j + 1, eraserPointsPageDu.lastIndex)]
+                if (disjointBounds(first, second, eraserFirst, eraserSecond,
+                        radius + tolerance)) continue
+                val ranges = if (similar) {
+                    val expanded = capsuleIntervals(
+                        first, second, eraserFirst, eraserSecond,
+                        radius + tolerance, (radius + tolerance) * (radius + tolerance),
+                    ) ?: return Result.Unresolved("Numerically ambiguous expanded boundary")
+                    if (expanded.isEmpty()) continue
+                    val contracted = capsuleIntervals(
+                        first, second, eraserFirst, eraserSecond,
+                        radius - tolerance, (radius - tolerance) * (radius - tolerance),
+                    ) ?: return Result.Unresolved("Numerically ambiguous contracted boundary")
+                    if (contracted.isEmpty()) {
+                        return Result.Unresolved("Near-tangential eraser contact")
+                    }
+                    capsuleIntervals(first, second, eraserFirst, eraserSecond,
+                        radius, radius * radius)
+                        ?: return Result.Unresolved("Numerically ambiguous capsule boundary")
+                } else {
+                    affineOverlapCount++
+                    if (affineOverlapCount > MAX_AFFINE_OVERLAPS) {
+                        return Result.Unresolved("Too many affine overlap calculations")
+                    }
+                    when (val verdict = affineSolver!!.classify(
+                        first, second, eraserFirst, eraserSecond,
+                    )) {
+                        EditorEraserAffinePartialIntervals.Verdict.NoHit -> continue
+                        EditorEraserAffinePartialIntervals.Verdict.Unresolved ->
+                            return Result.Unresolved("Ambiguous general-affine brush intersection")
+                        is EditorEraserAffinePartialIntervals.Verdict.Hit ->
+                            listOf(Range(verdict.interval.start, verdict.interval.end))
+                    }
                 }
-                val ranges = capsuleIntervals(a, b, c, d, radius, radiusSq)
-                    ?: return Result.Unresolved("Numerically ambiguous capsule boundary")
-                if (ranges.isEmpty()) return Result.Unresolved("Inconsistent capsule classification")
+                if (ranges.isEmpty()) {
+                    return Result.Unresolved("Inconsistent eraser intersection classification")
+                }
+                if (intersectsPageClip && !sweepDiskInsidePage) {
+                    return Result.Unresolved("Uncertain clipped-page eraser intersection")
+                }
                 for (range in ranges) {
-                    // Reject near-tangent or tiny intersections rather than
-                    // guessing that they authorize a destructive replacement.
                     if (range.end - range.start <= PARAM_EPS) {
                         return Result.Unresolved("Near-tangential eraser contact")
                     }

@@ -165,17 +165,121 @@ class EditorEraserPartialStrokeGeometryTest {
             erase(stroke = stroke(opacity = 0.001)))
     }
 
-    @Test fun transformedStrokeIsExplicitlyUnresolved() {
-        val translated = requireNotNull(
-            CanonicalElementAffine.fromCanonicalOrNull(listOf(1.0, 0.0, 0.0, 1.0, 20.0, 0.0))
-        )
-        assertTrue(erase(stroke = stroke(transform = translated)) is
+    private fun transform(vararg coeff: Double) = requireNotNull(
+        CanonicalElementAffine.fromCanonicalOrNull(coeff.toList())
+    )
+
+    @Test fun translationSplitsInElementLocalCoordinates() {
+        val translated = transform(1.0, 0.0, 0.0, 1.0, 20.0, 0.0)
+        val fragments = pieces(erase(stroke = stroke(transform = translated),
+            sweep = listOf(Point(70.0, 100.0))))
+        assertEquals(2, fragments.size)
+        assertEquals(45.0, fragments[0].last().xDu, 1e-7)
+        assertEquals(55.0, fragments[1].first().xDu, 1e-7)
+    }
+
+    @Test fun rotationPreservesLocalStrokeSamples() {
+        // Local y=100 maps to page x=100; local x maps to page y=100+x.
+        val rotated = transform(0.0, 1.0, -1.0, 0.0, 200.0, 100.0)
+        val fragments = pieces(erase(stroke = stroke(transform = rotated),
+            sweep = listOf(Point(100.0, 150.0))))
+        assertEquals(45.0, fragments[0].last().xDu, 1e-7)
+        assertEquals(55.0, fragments[1].first().xDu, 1e-7)
+    }
+
+    @Test fun reflectionProducesCorrectLocalCut() {
+        val reflected = transform(-1.0, 0.0, 0.0, 1.0, 100.0, 0.0)
+        val fragments = pieces(erase(stroke = stroke(transform = reflected)))
+        assertEquals(45.0, fragments[0].last().xDu, 1e-7)
+        assertEquals(55.0, fragments[1].first().xDu, 1e-7)
+    }
+
+    @Test fun uniformScalingUsesScaledBrushWidth() {
+        val scaled = transform(2.0, 0.0, 0.0, 2.0, 0.0, 0.0)
+        val fragments = pieces(erase(stroke = stroke(transform = scaled),
+            sweep = listOf(Point(100.0, 200.0))))
+        assertEquals(47.0, fragments[0].last().xDu, 1e-7)
+        assertEquals(53.0, fragments[1].first().xDu, 1e-7)
+    }
+
+    @Test fun nonuniformScaleUsesEllipticalPaintedFootprint() {
+        // x'=2x, y'=y. Local round brush becomes a (2 DU, 1 DU)
+        // page-space ellipse and the split remains in local coordinates.
+        val scaled = transform(2.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+        val fragments = pieces(erase(stroke = stroke(transform = scaled),
+            sweep = listOf(Point(100.0, 100.0))))
+        assertEquals(2, fragments.size)
+        assertEquals(47.0, fragments[0].last().xDu, 0.01)
+        assertEquals(53.0, fragments[1].first().xDu, 0.01)
+        assertEquals(100.0, fragments[0].last().yDu, 1e-8)
+    }
+
+    @Test fun shearUsesGeneralAffinePaintedFootprint() {
+        val sheared = transform(1.0, 0.0, 0.5, 1.0, 0.0, 0.0)
+        val fragments = pieces(erase(stroke = stroke(transform = sheared),
+            sweep = listOf(Point(100.0, 100.0))))
+        assertEquals(2, fragments.size)
+        assertEquals(45.0, fragments[0].last().xDu, 0.2)
+        assertEquals(55.0, fragments[1].first().xDu, 0.2)
+    }
+
+    @Test fun generalAffineDistantSweepIsUnchanged() {
+        val sheared = transform(1.0, 0.0, 0.5, 1.0, 0.0, 0.0)
+        assertEquals(EditorEraserPartialStrokeGeometry.Result.Unchanged,
+            erase(stroke = stroke(transform = sheared), sweep = listOf(Point(450.0, 400.0))))
+    }
+
+    @Test fun nearTangencyWithGeneralAffineFailsClosed() {
+        val scaled = transform(2.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+        assertTrue(erase(stroke = stroke(transform = scaled),
+            sweep = listOf(Point(100.0, 105.0))) is EditorEraserPartialStrokeGeometry.Result.Unresolved)
+    }
+
+    @Test fun pageClippedSourceCanBeSplitWhenEraserDiskIsFullyInsidePage() {
+        val clipped = stroke(points = listOf(sample(0.5), sample(90.0)))
+        val fragments = pieces(erase(stroke = clipped))
+        assertEquals(2, fragments.size)
+        assertEquals(0.5, fragments[0].first().xDu, 0.0)
+        assertEquals(45.0, fragments[0].last().xDu, 1e-7)
+        assertEquals(55.0, fragments[1].first().xDu, 1e-7)
+    }
+
+    @Test fun clippedStrokeBoundaryContactRemainsUnresolved() {
+        val clipped = stroke(points = listOf(sample(0.5), sample(90.0)))
+        assertTrue(erase(stroke = clipped, sweep = listOf(Point(2.0, 100.0))) is
             EditorEraserPartialStrokeGeometry.Result.Unresolved)
     }
 
-    @Test fun pageClippedStrokeFailsClosed() {
-        assertTrue(erase(stroke = stroke(points = listOf(sample(0.5), sample(90.0)))) is
-            EditorEraserPartialStrokeGeometry.Result.Unresolved)
+    @Test fun clippedStrokeWithDistantSweepIsUnchanged() {
+        val clipped = stroke(points = listOf(sample(0.5), sample(90.0)))
+        assertEquals(EditorEraserPartialStrokeGeometry.Result.Unchanged,
+            erase(stroke = clipped, sweep = listOf(Point(400.0, 500.0))))
+    }
+
+    @Test fun clippedAndTransformedStrokeCanBeSplitWhenContactIsVisible() {
+        val translation = transform(1.0, 0.0, 0.0, 1.0, -20.0, 0.0)
+        val fragments = pieces(erase(stroke = stroke(transform = translation),
+            sweep = listOf(Point(50.0, 100.0))))
+        assertEquals(65.0, fragments[0].last().xDu, 1e-7)
+        assertEquals(75.0, fragments[1].first().xDu, 1e-7)
+    }
+
+    @Test fun clippedAndNonuniformStrokeCanBeSplitWithInteriorEraser() {
+        val scaled = transform(2.0, 0.0, 0.0, 1.0, -25.0, 0.0)
+        val fragments = pieces(erase(stroke = stroke(transform = scaled),
+            sweep = listOf(Point(75.0, 100.0))))
+        assertEquals(47.0, fragments[0].last().xDu, 0.01)
+        assertEquals(53.0, fragments[1].first().xDu, 0.01)
+    }
+
+    @Test fun doesNotMutateOriginalSamplesOrTransformWhenAffinelySplit() {
+        val sheared = transform(1.0, 0.0, 0.5, 1.0, 0.0, 0.0)
+        val original = stroke(transform = sheared)
+        val before = original.samples.toList()
+        val coefficients = original.elementTransform.coefficients()
+        pieces(erase(stroke = original, sweep = listOf(Point(100.0, 100.0))))
+        assertEquals(before, original.samples)
+        assertEquals(coefficients, original.elementTransform.coefficients())
     }
 
     @Test fun repeatedSamplesDoNotCreateInvalidFragments() {
