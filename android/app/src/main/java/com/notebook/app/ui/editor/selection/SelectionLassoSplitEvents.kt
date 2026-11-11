@@ -46,6 +46,20 @@ internal object SelectionLassoSplitEvents {
             } catch (failure: Throwable) { close(); throw failure }
         }
 
+        /**
+         * Sequential owner-confined intersection; the kernel starts its own attempt.
+         * Calling during exact() rejects nesting and disposes this owner.
+         */
+        internal fun intersectExistingExactSegments(
+            a: Point, b: Point, c: Point, d: Point,
+        ): SelectionPredicateResult<Intersection> {
+            check(open)
+            return try {
+                SelectionExactSegmentIntersection.intersect(a, b, c, d, arena)
+                    .also { if (it !is SelectionPredicateResult.Known) close() }
+            } catch (failure: Throwable) { close(); throw failure }
+        }
+
         override fun close() { if (open) { open = false; arena.close() } }
     }
 

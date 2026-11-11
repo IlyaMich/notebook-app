@@ -319,6 +319,63 @@ class SelectionLassoSplitEventsTest {
         r.close()
     }
 
+    @Test fun ownedIntersectionHelperAllowsSequentialArithmeticAttempts() {
+        val b=SelectionQueryBudget()
+        prepare(square,b).use { owner ->
+            val points=known(owner.exact {
+                listOf(point(p(0,0)),point(p(1,1)),point(p(0,1)),point(p(1,0)))
+            })
+            val r=known(owner.intersectExistingExactSegments(points[0],points[1],points[2],points[3]))
+                as SelectionExactSegmentIntersection.Intersection.AtPoint
+            assertEquals("1/2,1/2",point(r.point))
+            assertEquals(Sign.ZERO,known(owner.exact { compare(r.firstParameter,rational(1,2)) }))
+            assertTrue(owner.segments.isNotEmpty())
+        }
+        assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+    }
+
+    @Test fun ownedIntersectionHelperWorkFailureClosesPreparationWithoutResettingWork() {
+        val b=SelectionQueryBudget()
+        val owner=prepare(square,b)
+        val points=known(owner.exact { listOf(point(p(0,0)),point(p(1,1))) })
+        val remaining=b.limits.query.getValue(SelectionQueryResource.WORK_UNITS)-
+            b.used(SelectionQueryResource.WORK_UNITS)
+        assertNull(b.charge(SelectionQueryResource.WORK_UNITS,remaining))
+        assertTrue(owner.intersectExistingExactSegments(points[0],points[1],points[0],points[1])
+            is SelectionPredicateResult.WorkloadExceeded)
+        assertEquals(b.limits.query.getValue(SelectionQueryResource.WORK_UNITS),
+            b.used(SelectionQueryResource.WORK_UNITS))
+        assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        assertThrows(IllegalStateException::class.java){owner.segments}
+        assertThrows(IllegalStateException::class.java){
+            owner.intersectExistingExactSegments(points[0],points[1],points[0],points[1])
+        }
+    }
+
+    @Test fun ownedIntersectionHelperPropagatesCancellationAndRejectsNestedAttempts() {
+        for(nested in listOf(false,true)) {
+            var cancel=false
+            val b=SelectionQueryBudget(cancellationCheckpoint={if(cancel)throw CancellationException()})
+            val owner=prepare(square,b)
+            val points=known(owner.exact { listOf(point(p(0,0)),point(p(1,1))) })
+            if(nested) {
+                assertThrows(IllegalStateException::class.java){
+                    owner.exact {
+                        owner.intersectExistingExactSegments(points[0],points[1],points[0],points[1])
+                    }
+                }
+            } else {
+                cancel=true
+                assertThrows(CancellationException::class.java){
+                    owner.intersectExistingExactSegments(points[0],points[1],points[0],points[1])
+                }
+            }
+            assertNull(b.failure)
+            assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertThrows(IllegalStateException::class.java){owner.segments}
+        }
+    }
+
     @Test fun immutableSnapshotsAndDeterministicRepeatedExecution() {
         val input=square.toMutableList()
         val original=input.toList()
