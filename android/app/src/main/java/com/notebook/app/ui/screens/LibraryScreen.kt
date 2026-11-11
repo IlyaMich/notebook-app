@@ -223,7 +223,10 @@ fun LibraryScreen(
         },
     ) { padding ->
         BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
-            if (maxWidth >= 840.dp) {
+            if (
+                libraryWindowLayout(maxWidth, maxHeight) ==
+                LibraryWindowLayout.EXPANDED
+            ) {
                 Row(modifier = Modifier.fillMaxSize()) {
                     Surface(
                         modifier = Modifier

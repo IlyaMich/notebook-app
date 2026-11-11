@@ -31,6 +31,8 @@ import com.notebook.app.ui.screens.LibraryScreen
 import com.notebook.app.ui.screens.NoteEditorScreen
 import com.notebook.app.ui.screens.NotebookContentsScreen
 import kotlinx.serialization.Serializable
+import com.notebook.app.ui.screens.LibraryWindowLayout
+import com.notebook.app.ui.screens.libraryWindowLayout
 
 @Serializable
 data object LibraryRoute : NavKey
@@ -120,7 +122,10 @@ fun NotebookApp() {
                 BoxWithConstraints(
                     modifier = Modifier.fillMaxSize(),
                 ) {
-                    if (maxWidth >= 840.dp) {
+                    if (
+                        libraryWindowLayout(maxWidth, maxHeight) ==
+                        LibraryWindowLayout.EXPANDED
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxSize(),
                         ) {
