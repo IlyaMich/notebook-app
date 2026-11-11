@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -26,12 +27,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.notebook.app.data.library.model.Folder
 import com.notebook.app.data.library.model.Notebook
 import com.notebook.app.data.library.repository.FolderRepository
 import com.notebook.app.data.library.repository.NotebookRepository
+import kotlinx.coroutines.CancellationException
 
 private data class SidebarChildren(
     val folders: List<Folder>,
@@ -43,8 +47,8 @@ private const val MAX_SIDEBAR_DEPTH = 12
 /**
  * Repository-backed wide-window library navigation.
  *
- * Folder expansion is local presentation state. Opening a destination
- * continues through the existing Navigation 3 callbacks.
+ * Expanding a folder does not navigate away. Notebook selection is
+ * supplied by the navigation route and is not duplicated in local state.
  */
 @Composable
 internal fun LibraryHierarchySidebar(
@@ -54,6 +58,7 @@ internal fun LibraryHierarchySidebar(
     onOpenFolder: (String) -> Unit,
     onOpenNotebook: (String) -> Unit,
     contentVersion: Int = 0,
+    activeNotebookId: String? = null,
 ) {
     var root by remember(folderRepository, notebookRepository) {
         mutableStateOf<SidebarChildren?>(null)
@@ -62,6 +67,9 @@ internal fun LibraryHierarchySidebar(
         mutableStateOf<String?>(null)
     }
     var retry by remember { mutableIntStateOf(0) }
+    var activeAncestorIds by remember {
+        mutableStateOf<Set<String>>(emptySet())
+    }
 
     LaunchedEffect(
         folderRepository,
@@ -71,14 +79,66 @@ internal fun LibraryHierarchySidebar(
     ) {
         root = null
         error = null
+
         try {
             notebookRepository.ensureQuickNotes()
+
             root = SidebarChildren(
                 folders = folderRepository.listByParent(null),
                 notebooks = notebookRepository.listByParent(null),
             )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (exception: Exception) {
-            error = exception.message ?: "Could not load library navigation"
+            error = exception.message
+                ?: "Could not load library navigation"
+        }
+    }
+
+    // Reveal the ancestors of the notebook selected by NotebookRoute.
+    LaunchedEffect(
+        activeNotebookId,
+        folderRepository,
+        notebookRepository,
+        contentVersion,
+    ) {
+        activeAncestorIds = emptySet()
+
+        if (activeNotebookId != null) {
+            try {
+                val selectedNotebook = notebookRepository.findById(
+                    activeNotebookId
+                )
+
+                val ancestors = mutableSetOf<String>()
+                var parentId = selectedNotebook?.parentFolderId
+
+                while (
+                    parentId != null &&
+                    ancestors.size < MAX_SIDEBAR_DEPTH
+                ) {
+                    if (parentId in ancestors) {
+                        break
+                    }
+
+                    val folder = folderRepository.findById(parentId)
+                        ?: break
+
+                    if (folder.deletedAtMillis != null) {
+                        break
+                    }
+
+                    ancestors.add(folder.id)
+                    parentId = folder.parentFolderId
+                }
+
+                activeAncestorIds = ancestors
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                // A genuine lookup failure must not crash the sidebar.
+                activeAncestorIds = emptySet()
+            }
         }
     }
 
@@ -127,6 +187,8 @@ internal fun LibraryHierarchySidebar(
                             folderRepository = folderRepository,
                             notebookRepository = notebookRepository,
                             activeFolderId = activeFolderId,
+                            activeNotebookId = activeNotebookId,
+                            autoExpandFolderIds = activeAncestorIds,
                             onOpenFolder = onOpenFolder,
                             onOpenNotebook = onOpenNotebook,
                             contentVersion = contentVersion,
@@ -140,6 +202,7 @@ internal fun LibraryHierarchySidebar(
                             notebook = notebook,
                             depth = 0,
                             onOpenNotebook = onOpenNotebook,
+                            activeNotebookId = activeNotebookId,
                         )
                     }
                 }
@@ -165,6 +228,8 @@ private fun SidebarFolderBranch(
     folderRepository: FolderRepository,
     notebookRepository: NotebookRepository,
     activeFolderId: String?,
+    activeNotebookId: String?,
+    autoExpandFolderIds: Set<String>,
     onOpenFolder: (String) -> Unit,
     onOpenNotebook: (String) -> Unit,
     contentVersion: Int,
@@ -180,6 +245,13 @@ private fun SidebarFolderBranch(
     }
     var retry by remember(folder.id) {
         mutableIntStateOf(0)
+    }
+
+    // Preserve manual expansion while also revealing a selected notebook.
+    LaunchedEffect(folder.id, autoExpandFolderIds) {
+        if (folder.id in autoExpandFolderIds) {
+            expanded = true
+        }
     }
 
     LaunchedEffect(
@@ -202,6 +274,8 @@ private fun SidebarFolderBranch(
                 folders = folderRepository.listByParent(folder.id),
                 notebooks = notebookRepository.listByParent(folder.id),
             )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (exception: Exception) {
             error = exception.message ?: "Could not load folder"
         }
@@ -234,9 +308,7 @@ private fun SidebarFolderBranch(
                         .heightIn(min = 48.dp)
                         .testTag("sidebar-expand-${folder.id}"),
                 ) {
-                    Text(
-                        text = if (expanded) "⌄" else "›",
-                    )
+                    Text(if (expanded) "⌄" else "›")
                     Text(
                         text = folder.name,
                         maxLines = 1,
@@ -292,6 +364,8 @@ private fun SidebarFolderBranch(
                         folderRepository = folderRepository,
                         notebookRepository = notebookRepository,
                         activeFolderId = activeFolderId,
+                        activeNotebookId = activeNotebookId,
+                        autoExpandFolderIds = autoExpandFolderIds,
                         onOpenFolder = onOpenFolder,
                         onOpenNotebook = onOpenNotebook,
                         contentVersion = contentVersion,
@@ -305,11 +379,15 @@ private fun SidebarFolderBranch(
                         notebook = notebook,
                         depth = depth + 1,
                         onOpenNotebook = onOpenNotebook,
+                        activeNotebookId = activeNotebookId,
                     )
                 }
             }
 
-            if (loaded.folders.isEmpty() && loaded.notebooks.isEmpty()) {
+            if (
+                loaded.folders.isEmpty() &&
+                loaded.notebooks.isEmpty()
+            ) {
                 Text(
                     text = "Empty folder",
                     style = MaterialTheme.typography.bodySmall,
@@ -325,14 +403,29 @@ private fun SidebarNotebookRow(
     notebook: Notebook,
     depth: Int,
     onOpenNotebook: (String) -> Unit,
+    activeNotebookId: String?,
 ) {
+    val isSelected = notebook.id == activeNotebookId
+
     TextButton(
         onClick = { onOpenNotebook(notebook.id) },
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = (depth * 10).coerceAtMost(70).dp)
+            .padding(
+                start = (depth * 10).coerceAtMost(70).dp
+            )
             .heightIn(min = 48.dp)
+            .semantics {
+                selected = isSelected
+            }
             .testTag("sidebar-notebook-${notebook.id}"),
+        colors = ButtonDefaults.textButtonColors(
+            containerColor = if (isSelected) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
     ) {
         Text(
             text = if (notebook.isQuickNotes) {

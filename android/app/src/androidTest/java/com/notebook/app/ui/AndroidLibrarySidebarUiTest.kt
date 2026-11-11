@@ -3,6 +3,7 @@ package com.notebook.app.ui
 
 import android.content.Context
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -25,6 +26,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AndroidLibrarySidebarUiTest {
+
     @get:Rule
     val compose = createComposeRule()
 
@@ -40,11 +42,13 @@ class AndroidLibrarySidebarUiTest {
             .targetContext
 
         databaseName = "lib06-sidebar-${UUID.randomUUID()}.sqlite"
+
         database = AppDatabaseProvider.openIsolated(
             context,
             databaseName,
         )
         database.openHelper.writableDatabase
+
         repositories = LibraryRepositoryFactory(database)
     }
 
@@ -67,6 +71,7 @@ class AndroidLibrarySidebarUiTest {
         val quickNotes = runBlocking {
             repositories.notebooks.ensureQuickNotes()
         }
+
         val opened = AtomicReference<String?>(null)
 
         compose.setContent {
@@ -83,6 +88,7 @@ class AndroidLibrarySidebarUiTest {
 
         val tag = "sidebar-notebook-${quickNotes.id}"
         awaitTag(tag)
+
         compose.onNodeWithTag(tag).performClick()
 
         assertEquals(quickNotes.id, opened.get())
@@ -93,9 +99,11 @@ class AndroidLibrarySidebarUiTest {
         val root = runBlocking {
             repositories.folders.create("University")
         }
+
         val nested = runBlocking {
             repositories.folders.create("Mathematics", root.id)
         }
+
         val notebook = runBlocking {
             repositories.notebooks.create("Calculus", nested.id)
         }
@@ -133,7 +141,7 @@ class AndroidLibrarySidebarUiTest {
 
         awaitTag("sidebar-notebook-${notebook.id}")
 
-        // Expansion only reveals hierarchy; it does not navigate.
+        // Expanding folders does not navigate.
         assertEquals(null, openedFolder.get())
         assertEquals(null, openedNotebook.get())
 
@@ -148,5 +156,67 @@ class AndroidLibrarySidebarUiTest {
         ).performClick()
 
         assertEquals(root.id, openedFolder.get())
+    }
+
+    @Test
+    fun selectedNotebookIsExposedInSidebarSemantics() {
+        val notebook = runBlocking {
+            repositories.notebooks.create("Selected Notebook")
+        }
+
+        compose.setContent {
+            MaterialTheme {
+                LibraryHierarchySidebar(
+                    folderRepository = repositories.folders,
+                    notebookRepository = repositories.notebooks,
+                    activeFolderId = null,
+                    activeNotebookId = notebook.id,
+                    onOpenFolder = {},
+                    onOpenNotebook = {},
+                )
+            }
+        }
+
+        val tag = "sidebar-notebook-${notebook.id}"
+        awaitTag(tag)
+
+        compose.onNodeWithTag(tag).assertIsSelected()
+    }
+
+    @Test
+    fun selectedNestedNotebookAutomaticallyExpandsAncestors() {
+        val root = runBlocking {
+            repositories.folders.create("University")
+        }
+
+        val nested = runBlocking {
+            repositories.folders.create("Mathematics", root.id)
+        }
+
+        val notebook = runBlocking {
+            repositories.notebooks.create("Calculus", nested.id)
+        }
+
+        compose.setContent {
+            MaterialTheme {
+                LibraryHierarchySidebar(
+                    folderRepository = repositories.folders,
+                    notebookRepository = repositories.notebooks,
+                    activeFolderId = null,
+                    activeNotebookId = notebook.id,
+                    onOpenFolder = {},
+                    onOpenNotebook = {},
+                )
+            }
+        }
+
+        // Neither folder requires a manual expansion click.
+        awaitTag("sidebar-expand-${root.id}")
+        awaitTag("sidebar-expand-${nested.id}")
+
+        val selectedTag = "sidebar-notebook-${notebook.id}"
+        awaitTag(selectedTag)
+
+        compose.onNodeWithTag(selectedTag).assertIsSelected()
     }
 }
