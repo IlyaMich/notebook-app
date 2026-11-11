@@ -64,7 +64,8 @@ internal object StoredCanonicalStrokeDecoder {
             }
         }
 
-    private fun decode(
+    /** Read-only single-row entry point; validation is shared with fromPage(). */
+    internal fun decode(
         pageId: String,
         element: StoredElement,
     ): StoredCanonicalStroke {
