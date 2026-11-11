@@ -9,6 +9,7 @@ import com.notebook.app.data.assets.RegisteredFinalizedImageDecoder
 import com.notebook.app.data.content.impl.matchesVerifiedImageMetadata
 import com.notebook.app.data.assets.ManagedAssetFileStore
 import com.notebook.app.data.assets.ManagedAssetRegistrar
+import com.notebook.app.data.library.impl.RoomLibraryTrashRepository
 import com.notebook.app.data.content.impl.RoomDocumentRepository
 import com.notebook.app.data.content.model.DocumentEdit
 import com.notebook.app.data.content.model.ImageFrame
@@ -728,6 +729,63 @@ class InsertVerifiedImageWriterAndroidTest {
         assertFalse(matchesVerifiedImageMetadata(asset.copy(sha256 = "0".repeat(64)), verified))
         assertTrue(db.elementDao().listByPage(page).isEmpty())
         assertEquals(0L, db.noteDao().findById(note)!!.revision)
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun attachedImageSurvivesTrashRestoreWithOriginalOwnerAndRevision() = runBlocking {
+        val (note, page) = noteAndPage()
+        val asset = imageAsset()
+        val element = id()
+        assertEquals(1L, repo.insertVerifiedImage(command(note, page, asset.id, element)).revision)
+        val originalNote = db.noteDao().findById(note)!!
+        val originalElement = db.elementDao().findById(element)!!
+        val originalEdge = db.assetOwnershipDao().findElementReference(element)!!
+        val originalAsset = db.assetDao().findById(asset.id)!!
+        val originalBytes = File(root, asset.relativePath).readBytes()
+        val trash = RoomLibraryTrashRepository(db, clock = { 3_000L })
+        val batch = trash.trashNote(note)
+        assertTrue(db.noteDao().findById(note)!!.deletedAtMillis != null)
+        assertEquals(originalNote.revision, db.noteDao().findById(note)!!.revision)
+        assertEquals(originalElement, db.elementDao().findById(element))
+        assertEquals(originalEdge, db.assetOwnershipDao().findElementReference(element))
+        assertEquals(originalAsset, db.assetDao().findById(asset.id))
+        assertTrue(originalBytes.contentEquals(File(root, asset.relativePath).readBytes()))
+        reopen()
+        RoomLibraryTrashRepository(db, clock = { 3_000L }).restoreBatch(batch)
+        val restored = db.noteDao().findById(note)!!
+        assertEquals(null, restored.deletedAtMillis)
+        assertEquals(originalNote.revision, restored.revision)
+        assertEquals(originalElement, db.elementDao().findById(element))
+        assertEquals(originalEdge, db.assetOwnershipDao().findElementReference(element))
+        assertEquals(originalAsset, db.assetDao().findById(asset.id))
+        assertTrue(originalBytes.contentEquals(File(root, asset.relativePath).readBytes()))
+        assertEquals(1L, repo.load(note).revision)
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun attachedImageBlocksPermanentPurgePreviewAfterTrashAndReopen() = runBlocking {
+        val (note, page) = noteAndPage()
+        val asset = imageAsset()
+        val element = id()
+        repo.insertVerifiedImage(command(note, page, asset.id, element))
+        val originalElement = db.elementDao().findById(element)!!
+        val originalEdge = db.assetOwnershipDao().findElementReference(element)!!
+        val originalAsset = db.assetDao().findById(asset.id)!!
+        val originalBytes = File(root, asset.relativePath).readBytes()
+        val batch = RoomLibraryTrashRepository(db, clock = { 3_000L }).trashNote(note)
+        reopen()
+        val failure = runCatching {
+            RoomLibraryTrashRepository(db, clock = { 3_000L }).previewPurge(batch)
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryOperationException && failure.code == LibraryErrorCode.UNSUPPORTED_CONTENT)
+        val trashed = db.noteDao().findById(note)!!
+        assertEquals(batch, trashed.deletionBatchId)
+        assertTrue(trashed.deletedAtMillis != null)
+        assertEquals(1L, trashed.revision)
+        assertEquals(originalElement, db.elementDao().findById(element))
+        assertEquals(originalEdge, db.assetOwnershipDao().findElementReference(element))
+        assertEquals(originalAsset, db.assetDao().findById(asset.id))
+        assertTrue(originalBytes.contentEquals(File(root, asset.relativePath).readBytes()))
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
     }
 
