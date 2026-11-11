@@ -38,6 +38,75 @@ class SelectionLassoIncidentAdjacencyTest {
         val id=a.vertices.single { point(it.point)==origin }.id
         return a.incidents[id].outgoing.map { point(a.vertices[a.halfEdges[it].destination].point) }
     }
+    @Test fun ownerMismatchNeverInvokesForeignCancellationOrChangesRetainedState() {
+        for(input in listOf(emptyList(),square)) {
+            val primaryBudget=SelectionQueryBudget()
+            val primary=prepare(input,primaryBudget)
+            var armed=false; var callbacks=0
+            val foreignBudget=SelectionQueryBudget(cancellationCheckpoint={
+                callbacks++
+                if(armed)throw CancellationException("Foreign owner must not be probed")
+            })
+            val foreign=prepare(input,foreignBudget)
+            try {
+                val borrower=grouped(foreign)
+                val retained=borrower.edges
+                val counters=SelectionQueryResource.entries.associateWith { foreignBudget.used(it) }
+                val failure=foreignBudget.failure
+                val checkpoints=callbacks
+                val primaryWork=primaryBudget.used(SelectionQueryResource.WORK_UNITS)
+                armed=true
+                assertTrue(borrower.isOwnedBy(foreign))
+                assertFalse(borrower.isOwnedBy(primary))
+                assertEquals(Result.InvalidInput(InvalidReason.OWNER_MISMATCH),
+                    SelectionLassoIncidentAdjacency.build(primary,borrower))
+                assertEquals(checkpoints,callbacks)
+                assertEquals(counters,SelectionQueryResource.entries.associateWith { foreignBudget.used(it) })
+                assertSame(failure,foreignBudget.failure)
+                assertSame(retained,borrower.edges)
+                assertEquals(input,foreign.suppliedVertices)
+                assertThrows(IllegalStateException::class.java){primary.segments}
+                assertEquals(0L,primaryBudget.used(SelectionQueryResource.TEMPORARY_BYTES))
+                assertEquals(primaryWork,primaryBudget.used(SelectionQueryResource.WORK_UNITS))
+                armed=false
+                assertEquals(7,known(foreign.exact { 7 })) // still usable after rejection
+            } finally { primary.close(); foreign.close() }
+        }
+    }
+
+    @Test fun ownerMismatchPreservesForeignStickyFailureWithoutExecutingIt() {
+        for(input in listOf(emptyList(),square)) {
+            val primaryBudget=SelectionQueryBudget()
+            val primary=prepare(input,primaryBudget)
+            var armed=false; var callbacks=0
+            val foreignBudget=SelectionQueryBudget(cancellationCheckpoint={
+                callbacks++
+                if(armed)throw CancellationException("Foreign failure must not be probed")
+            })
+            val foreign=prepare(input,foreignBudget)
+            try {
+                val borrower=grouped(foreign)
+                val retained=borrower.edges
+                val remaining=foreignBudget.limits.query.getValue(SelectionQueryResource.WORK_UNITS)-
+                    foreignBudget.used(SelectionQueryResource.WORK_UNITS)
+                assertNotNull(foreignBudget.charge(SelectionQueryResource.WORK_UNITS,remaining+1))
+                val counters=SelectionQueryResource.entries.associateWith { foreignBudget.used(it) }
+                val failure=foreignBudget.failure
+                val checkpoints=callbacks
+                armed=true
+                assertEquals(Result.InvalidInput(InvalidReason.OWNER_MISMATCH),
+                    SelectionLassoIncidentAdjacency.build(primary,borrower))
+                assertEquals(checkpoints,callbacks)
+                assertEquals(counters,SelectionQueryResource.entries.associateWith { foreignBudget.used(it) })
+                assertSame(failure,foreignBudget.failure)
+                assertSame(retained,borrower.edges)
+                assertEquals(input,foreign.suppliedVertices)
+                assertThrows(IllegalStateException::class.java){primary.segments}
+                assertEquals(0L,primaryBudget.used(SelectionQueryResource.TEMPORARY_BYTES))
+            } finally { primary.close(); foreign.close() }
+        }
+    }
+
     private fun limits(resource: SelectionQueryResource,n: Long)=SelectionQueryLimits(
         query=SelectionQueryResource.entries.associateWith { if(it==resource)n else it.queryCeiling })
     private fun failure(r: Result): SelectionWorkloadFailure {

@@ -34,6 +34,8 @@ internal object SelectionLassoCoincidentGeometry {
     ) {
         val vertices: List<Vertex> get() { owner.segments; return points }
         val edges: List<EdgeGroup> get() { owner.segments; return groups }
+        internal fun isOwnedBy(prepared: Prepared): Boolean = owner === prepared
+
         fun <T> exact(action: SelectionExactArithmetic.() -> T): SelectionPredicateResult<T> =
             owner.exact(action)
     }
@@ -59,9 +61,7 @@ internal object SelectionLassoCoincidentGeometry {
                 prepared.segments
                 atomic.fragments
             } catch (_: IllegalStateException) { throw Invalid(InvalidReason.OWNER_CLOSED) }
-            val ownerArena = value(prepared.exact { this })
-            val atomicArena = value(atomic.exact { this })
-            verify(ownerArena === atomicArena, InvalidReason.OWNER_MISMATCH)
+            verify(atomic.isOwnedBy(prepared), InvalidReason.OWNER_MISMATCH)
             val grouped = value(prepared.exact { construct(prepared, fragments) })
             success = true
             return Result.Ready(grouped)

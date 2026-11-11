@@ -44,6 +44,8 @@ internal object SelectionLassoAtomicEdges {
             owner.segments // enforce the owner's lifetime before exposing borrowed records
             return records
         }
+        internal fun isOwnedBy(prepared: Prepared): Boolean = owner === prepared
+
         fun <T> exact(action: SelectionExactArithmetic.() -> T): SelectionPredicateResult<T> =
             owner.exact(action)
     }

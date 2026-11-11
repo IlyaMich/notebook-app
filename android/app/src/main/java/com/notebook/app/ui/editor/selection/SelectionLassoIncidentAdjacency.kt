@@ -39,6 +39,8 @@ internal object SelectionLassoIncidentAdjacency {
         val incidents: List<Incident> get() { owner.segments; return adjacency }
         val edgeGroups: List<EdgeGroup> get() { owner.segments; return grouped.edges }
         val vertices: List<Vertex> get() { owner.segments; return grouped.vertices }
+        internal fun isOwnedBy(prepared: Prepared): Boolean = owner === prepared
+
         fun <T> exact(action: SelectionExactArithmetic.() -> T): SelectionPredicateResult<T> =
             owner.exact(action)
     }
@@ -61,9 +63,7 @@ internal object SelectionLassoIncidentAdjacency {
             // Getter checks do not invoke cancellation callbacks, unlike arithmetic attempts.
             try { prepared.segments; grouped.vertices; grouped.edges }
             catch (_: IllegalStateException) { throw Invalid(InvalidReason.OWNER_CLOSED) }
-            val arena = value(prepared.exact { this })
-            val groupedArena = value(grouped.exact { this })
-            verify(arena === groupedArena, InvalidReason.OWNER_MISMATCH)
+            verify(grouped.isOwnedBy(prepared), InvalidReason.OWNER_MISMATCH)
             val result = value(prepared.exact { construct(prepared, grouped) })
             success = true
             return Result.Ready(result)
