@@ -158,4 +158,71 @@ class SelectionExactArithmeticTest {
         }
         assertEquals(1, work.distinct().size)
     }
+
+    @Test fun atomicEdgeAdmissionRequiresAttemptAndChargesOriginalBudget() {
+        val b=SelectionQueryBudget()
+        val a=SelectionExactArithmetic(b)
+        assertThrows(IllegalStateException::class.java) { a.chargeAtomicLassoEdgeRecord() }
+        assertEquals(0L,b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+        known(a.attempt { chargeAtomicLassoEdgeRecord(); chargeAtomicLassoEdgeRecord() })
+        assertEquals(2L,b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+        assertEquals(2L,b.used(SelectionQueryResource.WORK_UNITS))
+        assertEquals(320L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        a.close()
+        assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        assertThrows(IllegalStateException::class.java) { a.chargeAtomicLassoEdgeRecord() }
+    }
+
+    @Test fun atomicEdgeQuotaRejectsBeforeRecordAllocationAndStaysSticky() {
+        val limits=SelectionQueryResource.entries.associateWith {
+            if(it==SelectionQueryResource.ARRANGEMENT_EDGES) 1L else it.queryCeiling
+        }
+        val b=SelectionQueryBudget(SelectionQueryLimits(query=limits))
+        SelectionExactArithmetic(b).use { a ->
+            known(a.attempt { chargeAtomicLassoEdgeRecord() })
+            val result=a.attempt { chargeAtomicLassoEdgeRecord() }
+            assertTrue(result is SelectionPredicateResult.WorkloadExceeded)
+            assertEquals(SelectionQueryResource.ARRANGEMENT_EDGES,
+                (result as SelectionPredicateResult.WorkloadExceeded).failure.resource)
+        }
+        assertEquals(1L,b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+        assertEquals(1L,b.used(SelectionQueryResource.WORK_UNITS))
+        assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        SelectionExactArithmetic(b).use { a ->
+            assertTrue(a.attempt { chargeAtomicLassoEdgeRecord() } is SelectionPredicateResult.WorkloadExceeded)
+        }
+        assertEquals(1L,b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+    }
+
+    @Test fun atomicEdgeWorkAndRepresentationDenialReleaseReservations() {
+        for((resource,maximum) in listOf(SelectionQueryResource.WORK_UNITS to 0L,
+            SelectionQueryResource.TEMPORARY_BYTES to 159L)) {
+            val limits=SelectionQueryResource.entries.associateWith {
+                if(it==resource) maximum else it.queryCeiling
+            }
+            val b=SelectionQueryBudget(SelectionQueryLimits(query=limits))
+            SelectionExactArithmetic(b).use { a ->
+                val result=a.attempt { chargeAtomicLassoEdgeRecord() }
+                assertTrue(result is SelectionPredicateResult.WorkloadExceeded)
+                assertEquals(resource,(result as SelectionPredicateResult.WorkloadExceeded).failure.resource)
+            }
+            assertEquals(1L,b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+            assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        }
+    }
+
+    @Test fun atomicEdgeCancellationPropagatesBeforeAllocation() {
+        lateinit var b: SelectionQueryBudget
+        b=SelectionQueryBudget(cancellationCheckpoint={
+            if(b.used(SelectionQueryResource.ARRANGEMENT_EDGES)==1L) throw CancellationException()
+        })
+        SelectionExactArithmetic(b).use { a ->
+            known(a.attempt { retainRecord(32) })
+            assertThrows(CancellationException::class.java) { a.attempt { chargeAtomicLassoEdgeRecord() } }
+        }
+        assertNull(b.failure)
+        assertEquals(1L,b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+        assertEquals(0L,b.used(SelectionQueryResource.WORK_UNITS))
+        assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+    }
 }

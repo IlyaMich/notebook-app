@@ -236,6 +236,17 @@ internal class SelectionExactArithmetic(private val budget: SelectionQueryBudget
     }
     fun vector(a: Point, b: Point): Point = point(subtract(a.x, b.x), subtract(a.y, b.y))
     fun cross(a: Point, b: Point): Rational = subtract(multiply(a.x, b.y), multiply(a.y, b.x))
+    /**
+     * Admit one attempted atomic lasso fragment before allocating its record. Representation
+     * includes the fragment and list growth/copy slots; it remains charged until arena disposal.
+     */
+    internal fun chargeAtomicLassoEdgeRecord() {
+        active()
+        consume(budget.charge(SelectionQueryResource.ARRANGEMENT_EDGES))
+        consume(budget.charge(SelectionQueryResource.WORK_UNITS))
+        retainRecord(160)
+    }
+
     internal fun retainRecord(bytes: Long) { active(); reserve(bytes) }
     private fun signOf(n: Int) = when {
         n < 0 -> SelectionRobustPredicates.Sign.NEGATIVE
