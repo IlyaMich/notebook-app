@@ -2,16 +2,20 @@
 package com.notebook.app.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -25,10 +29,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.notebook.app.data.library.model.Folder
@@ -36,6 +44,8 @@ import com.notebook.app.data.library.model.Notebook
 import com.notebook.app.data.library.repository.FolderRepository
 import com.notebook.app.data.library.repository.NotebookRepository
 import kotlinx.coroutines.CancellationException
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 
 private data class SidebarChildren(
     val folders: List<Folder>,
@@ -47,8 +57,8 @@ private const val MAX_SIDEBAR_DEPTH = 12
 /**
  * Repository-backed wide-window library navigation.
  *
- * Expanding a folder does not navigate away. Notebook selection is
- * supplied by the navigation route and is not duplicated in local state.
+ * Folder expansion is independent of navigation. The active notebook
+ * is supplied by the Navigation 3 route rather than duplicated here.
  */
 @Composable
 internal fun LibraryHierarchySidebar(
@@ -95,7 +105,7 @@ internal fun LibraryHierarchySidebar(
         }
     }
 
-    // Reveal the ancestors of the notebook selected by NotebookRoute.
+    // Expand the ancestor path of the currently selected notebook.
     LaunchedEffect(
         activeNotebookId,
         folderRepository,
@@ -106,27 +116,23 @@ internal fun LibraryHierarchySidebar(
 
         if (activeNotebookId != null) {
             try {
-                val selectedNotebook = notebookRepository.findById(
+                val selected = notebookRepository.findById(
                     activeNotebookId
                 )
 
                 val ancestors = mutableSetOf<String>()
-                var parentId = selectedNotebook?.parentFolderId
+                var parentId = selected?.parentFolderId
 
                 while (
                     parentId != null &&
                     ancestors.size < MAX_SIDEBAR_DEPTH
                 ) {
-                    if (parentId in ancestors) {
-                        break
-                    }
+                    if (parentId in ancestors) break
 
                     val folder = folderRepository.findById(parentId)
                         ?: break
 
-                    if (folder.deletedAtMillis != null) {
-                        break
-                    }
+                    if (folder.deletedAtMillis != null) break
 
                     ancestors.add(folder.id)
                     parentId = folder.parentFolderId
@@ -136,7 +142,7 @@ internal fun LibraryHierarchySidebar(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (exception: Exception) {
-                // A genuine lookup failure must not crash the sidebar.
+                // An unavailable selection must not crash the sidebar.
                 activeAncestorIds = emptySet()
             }
         }
@@ -177,9 +183,9 @@ internal fun LibraryHierarchySidebar(
             }
 
             else -> {
-                val rootContents = root!!
+                val contents = root!!
 
-                rootContents.folders.forEach { folder ->
+                contents.folders.forEach { folder ->
                     key("sidebar-folder:${folder.id}") {
                         SidebarFolderBranch(
                             folder = folder,
@@ -196,7 +202,7 @@ internal fun LibraryHierarchySidebar(
                     }
                 }
 
-                rootContents.notebooks.forEach { notebook ->
+                contents.notebooks.forEach { notebook ->
                     key("sidebar-notebook:${notebook.id}") {
                         SidebarNotebookRow(
                             notebook = notebook,
@@ -208,8 +214,8 @@ internal fun LibraryHierarchySidebar(
                 }
 
                 if (
-                    rootContents.folders.isEmpty() &&
-                    rootContents.notebooks.isEmpty()
+                    contents.folders.isEmpty() &&
+                    contents.notebooks.isEmpty()
                 ) {
                     Text(
                         text = "No library items",
@@ -247,7 +253,6 @@ private fun SidebarFolderBranch(
         mutableIntStateOf(0)
     }
 
-    // Preserve manual expansion while also revealing a selected notebook.
     LaunchedEffect(folder.id, autoExpandFolderIds) {
         if (folder.id in autoExpandFolderIds) {
             expanded = true
@@ -292,38 +297,63 @@ private fun SidebarFolderBranch(
         },
         shape = MaterialTheme.shapes.small,
     ) {
-        Column(
-            modifier = Modifier.padding(
-                start = (depth * 10).coerceAtMost(70).dp
-            ),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(
+                    start = (depth * 10).coerceAtMost(70).dp
+                ),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            // This button only expands or collapses the tree.
+            IconButton(
+                onClick = { expanded = !expanded },
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("sidebar-expand-${folder.id}")
+                    .semantics {
+                        contentDescription = if (expanded) {
+                            "Collapse folder ${folder.name}"
+                        } else {
+                            "Expand folder ${folder.name}"
+                        }
+                        stateDescription = if (expanded) {
+                            "Expanded"
+                        } else {
+                            "Collapsed"
+                        }
+                    },
             ) {
-                TextButton(
-                    onClick = { expanded = !expanded },
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp)
-                        .testTag("sidebar-expand-${folder.id}"),
-                ) {
-                    Text(if (expanded) "⌄" else "›")
-                    Text(
-                        text = folder.name,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                Text(
+                    text = if (expanded) "⌄" else "›",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.clearAndSetSemantics {},
+                )
+            }
 
-                TextButton(
-                    onClick = { onOpenFolder(folder.id) },
-                    modifier = Modifier
-                        .heightIn(min = 48.dp)
-                        .testTag("sidebar-open-folder-${folder.id}"),
-                ) {
-                    Text("Open")
-                }
+            // The folder name is the navigation action. The legacy
+            // test tag is retained for existing instrumentation.
+            TextButton(
+                onClick = { onOpenFolder(folder.id) },
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .testTag("sidebar-open-folder-${folder.id}")
+                    .semantics {
+                        contentDescription = "Open folder ${folder.name}"
+                        selected = isCurrentFolder
+                    },
+                contentPadding = PaddingValues(
+                    start = 0.dp,
+                    end = 4.dp,
+                ),
+            ) {
+                Text(
+                    text = folder.name,
+                    modifier = Modifier.fillMaxWidth(),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -415,10 +445,12 @@ private fun SidebarNotebookRow(
                 start = (depth * 10).coerceAtMost(70).dp
             )
             .heightIn(min = 48.dp)
+            .testTag("sidebar-notebook-${notebook.id}")
             .semantics {
+                contentDescription = "Open notebook ${notebook.name}"
                 selected = isSelected
-            }
-            .testTag("sidebar-notebook-${notebook.id}"),
+            },
+        contentPadding = PaddingValues(0.dp),
         colors = ButtonDefaults.textButtonColors(
             containerColor = if (isSelected) {
                 MaterialTheme.colorScheme.primaryContainer
@@ -427,12 +459,21 @@ private fun SidebarNotebookRow(
             },
         ),
     ) {
+        // The icon occupies the same width as a folder chevron,
+        // aligning notebook names with folder names at each depth.
+        Box(
+            modifier = Modifier.width(48.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = if (notebook.isQuickNotes) "★" else "▣",
+                modifier = Modifier.clearAndSetSemantics {},
+            )
+        }
+
         Text(
-            text = if (notebook.isQuickNotes) {
-                "★ ${notebook.name}"
-            } else {
-                "▣ ${notebook.name}"
-            },
+            text = notebook.name,
+            modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -456,7 +497,9 @@ private fun SidebarError(
 
         TextButton(
             onClick = onRetry,
-            modifier = Modifier.testTag("sidebar-retry"),
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .testTag("sidebar-retry"),
         ) {
             Text("Retry")
         }

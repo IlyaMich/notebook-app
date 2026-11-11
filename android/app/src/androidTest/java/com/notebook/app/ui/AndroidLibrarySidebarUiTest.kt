@@ -3,11 +3,15 @@ package com.notebook.app.ui
 
 import android.content.Context
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.notebook.app.data.library.impl.LibraryRepositoryFactory
@@ -42,13 +46,11 @@ class AndroidLibrarySidebarUiTest {
             .targetContext
 
         databaseName = "lib06-sidebar-${UUID.randomUUID()}.sqlite"
-
         database = AppDatabaseProvider.openIsolated(
             context,
             databaseName,
         )
         database.openHelper.writableDatabase
-
         repositories = LibraryRepositoryFactory(database)
     }
 
@@ -71,7 +73,6 @@ class AndroidLibrarySidebarUiTest {
         val quickNotes = runBlocking {
             repositories.notebooks.ensureQuickNotes()
         }
-
         val opened = AtomicReference<String?>(null)
 
         compose.setContent {
@@ -88,7 +89,6 @@ class AndroidLibrarySidebarUiTest {
 
         val tag = "sidebar-notebook-${quickNotes.id}"
         awaitTag(tag)
-
         compose.onNodeWithTag(tag).performClick()
 
         assertEquals(quickNotes.id, opened.get())
@@ -99,11 +99,9 @@ class AndroidLibrarySidebarUiTest {
         val root = runBlocking {
             repositories.folders.create("University")
         }
-
         val nested = runBlocking {
             repositories.folders.create("Mathematics", root.id)
         }
-
         val notebook = runBlocking {
             repositories.notebooks.create("Calculus", nested.id)
         }
@@ -141,7 +139,7 @@ class AndroidLibrarySidebarUiTest {
 
         awaitTag("sidebar-notebook-${notebook.id}")
 
-        // Expanding folders does not navigate.
+        // Expanding the hierarchy does not navigate.
         assertEquals(null, openedFolder.get())
         assertEquals(null, openedNotebook.get())
 
@@ -188,11 +186,9 @@ class AndroidLibrarySidebarUiTest {
         val root = runBlocking {
             repositories.folders.create("University")
         }
-
         val nested = runBlocking {
             repositories.folders.create("Mathematics", root.id)
         }
-
         val notebook = runBlocking {
             repositories.notebooks.create("Calculus", nested.id)
         }
@@ -210,7 +206,6 @@ class AndroidLibrarySidebarUiTest {
             }
         }
 
-        // Neither folder requires a manual expansion click.
         awaitTag("sidebar-expand-${root.id}")
         awaitTag("sidebar-expand-${nested.id}")
 
@@ -218,5 +213,116 @@ class AndroidLibrarySidebarUiTest {
         awaitTag(selectedTag)
 
         compose.onNodeWithTag(selectedTag).assertIsSelected()
+    }
+
+    @Test
+    fun folderActionsHaveAccessibleLabelsAndIndependentBehavior() {
+        val folder = runBlocking {
+            repositories.folders.create("Projects")
+        }
+        val opened = AtomicReference<String?>(null)
+
+        compose.setContent {
+            MaterialTheme {
+                LibraryHierarchySidebar(
+                    folderRepository = repositories.folders,
+                    notebookRepository = repositories.notebooks,
+                    activeFolderId = folder.id,
+                    onOpenFolder = { opened.set(it) },
+                    onOpenNotebook = {},
+                )
+            }
+        }
+
+        val expandTag = "sidebar-expand-${folder.id}"
+        val openTag = "sidebar-open-folder-${folder.id}"
+
+        awaitTag(expandTag)
+
+        compose.onNodeWithTag(expandTag)
+            .assertContentDescriptionEquals("Expand folder Projects")
+
+        compose.onNodeWithTag(openTag)
+            .assertContentDescriptionEquals("Open folder Projects")
+            .assertIsSelected()
+
+        compose.onNodeWithTag(expandTag).performClick()
+
+        compose.onNodeWithTag(expandTag)
+            .assertContentDescriptionEquals("Collapse folder Projects")
+
+        // Expanding must not open the folder.
+        assertEquals(null, opened.get())
+
+        compose.onNodeWithTag(openTag).performClick()
+        assertEquals(folder.id, opened.get())
+    }
+
+    @Test
+    fun notebookHasAccessibleNameAndSelectedState() {
+        val notebook = runBlocking {
+            repositories.notebooks.create("Research Notes")
+        }
+
+        compose.setContent {
+            MaterialTheme {
+                LibraryHierarchySidebar(
+                    folderRepository = repositories.folders,
+                    notebookRepository = repositories.notebooks,
+                    activeFolderId = null,
+                    activeNotebookId = notebook.id,
+                    onOpenFolder = {},
+                    onOpenNotebook = {},
+                )
+            }
+        }
+
+        val tag = "sidebar-notebook-${notebook.id}"
+        awaitTag(tag)
+
+        compose.onNodeWithTag(tag)
+            .assertContentDescriptionEquals(
+                "Open notebook Research Notes"
+            )
+            .assertIsSelected()
+    }
+
+    @Test
+    fun sidebarActionsMeetMinimumTouchTargetSize() {
+        val folder = runBlocking {
+            repositories.folders.create("Projects")
+        }
+        val notebook = runBlocking {
+            repositories.notebooks.create("Research Notes")
+        }
+
+        compose.setContent {
+            MaterialTheme {
+                LibraryHierarchySidebar(
+                    folderRepository = repositories.folders,
+                    notebookRepository = repositories.notebooks,
+                    activeFolderId = null,
+                    onOpenFolder = {},
+                    onOpenNotebook = {},
+                )
+            }
+        }
+
+        val expandTag = "sidebar-expand-${folder.id}"
+        val openTag = "sidebar-open-folder-${folder.id}"
+        val notebookTag = "sidebar-notebook-${notebook.id}"
+
+        awaitTag(expandTag)
+        awaitTag(notebookTag)
+
+        compose.onNodeWithTag(expandTag)
+            .assertWidthIsAtLeast(48.dp)
+            .assertHeightIsAtLeast(48.dp)
+
+        compose.onNodeWithTag(openTag)
+            .assertHeightIsAtLeast(48.dp)
+
+        compose.onNodeWithTag(notebookTag)
+            .assertHeightIsAtLeast(48.dp)
     }
 }
