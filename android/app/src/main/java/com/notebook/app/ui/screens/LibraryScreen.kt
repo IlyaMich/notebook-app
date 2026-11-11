@@ -226,21 +226,21 @@ fun LibraryScreen(
             if (maxWidth >= 840.dp) {
                 Row(modifier = Modifier.fillMaxSize()) {
                     Surface(
-                        modifier = Modifier.width(220.dp).fillMaxHeight(),
+                        modifier = Modifier
+                            .width(220.dp)
+                            .fillMaxHeight(),
                         color = MaterialTheme.colorScheme.surfaceVariant,
                     ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            Text("Library", style = MaterialTheme.typography.titleMedium)
-                            Text(if (parentFolderId == null) "Root" else "Current folder")
-                            Text(folderName ?: "Folders and notebooks",
-                                style = MaterialTheme.typography.bodySmall)
-                            Text("Recent: later checkpoint",
-                                style = MaterialTheme.typography.bodySmall)
-                        }
+                        LibraryHierarchySidebar(
+                            folderRepository = folderRepository,
+                            notebookRepository = notebookRepository,
+                            activeFolderId = parentFolderId,
+                            onOpenFolder = onOpenFolder,
+                            onOpenNotebook = onOpenNotebook,
+                            contentVersion = refresh + contentVersion,
+                        )
                     }
+
                     LibraryFolderContents(
                         modifier = Modifier.weight(1f),
                         listing = listing,
