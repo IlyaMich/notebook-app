@@ -35,10 +35,8 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.notebook.app.data.content.model.StoredPage
-import com.notebook.app.ui.editor.ink.CanonicalStrokeCanvasRenderer
-import com.notebook.app.ui.editor.ink.CanonicalStrokeRenderPlan
-import com.notebook.app.ui.editor.ink.StoredCanonicalStroke
-import com.notebook.app.ui.editor.ink.StoredCanonicalStrokeDecoder
+import com.notebook.app.ui.editor.rendering.PageElementCanvasRenderer
+import com.notebook.app.ui.editor.rendering.PageElementRenderPlan
 import java.util.LinkedHashMap
 import org.json.JSONObject
 import android.util.Log
@@ -65,6 +63,22 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.notebook.app.ui.editor.ink.StrokeViewportAffine
+import com.notebook.app.ui.editor.shapes.CanonicalShapeCanvasRenderer
+import com.notebook.app.ui.editor.shapes.CompletedShapeCreation
+import com.notebook.app.ui.editor.shapes.EditorShapeTool
+import com.notebook.app.ui.editor.shapes.ShapeCreationDefaults
+import com.notebook.app.ui.editor.shapes.ShapeCreationGesture
+import com.notebook.app.ui.editor.shapes.EditorShapeSelection
+import com.notebook.app.ui.editor.shapes.CompletedShapeEdit
+import com.notebook.app.ui.editor.shapes.ShapeEditGesture
+import com.notebook.app.ui.editor.shapes.ShapeEditingHitTest
+import com.notebook.app.ui.editor.shapes.CanonicalShapeAdapter
+import com.notebook.app.ui.editor.rendering.PageElementCommand
+import com.notebook.app.ui.editor.ink.elementToViewportAffine
+import com.notebook.app.ui.editor.ink.PageStrokeClipPx
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** Read-only snapshot for this checkpoint. Use page IDs/dimensions from DocumentRepository.load. */
 data class PageViewportItem(
@@ -103,11 +117,11 @@ private fun PointerType.toEditorContact(): EditorContact =
     }
 
 /**
- * EDT-03 checkpoint 4: a read-only Canvas of persisted, mixed-size pages.
- * Touch drag pans, pinch zooms, and taps resolve page-local hit targets for later tools.
- * On window/layout resize, an anchor and relative zoom are preserved where edge clamping allows.
- * Geometry is transient: no document writes or canonical element changes occur.
- * Tool input arbitration and element rendering arrive in later issues.
+ * Canvas of persisted, mixed-size pages with one shared pointer owner.
+ * Finger navigation pans/zooms; writing contacts dispatch to pen, eraser or shape capture.
+ * Completed actions leave through callbacks to the existing editor command boundaries.
+ * On window/layout resize, a page-local anchor and relative zoom are preserved.
+ * The camera and unfinished previews remain transient.
  */
 @Composable
 fun ContinuousPageViewport(
@@ -123,7 +137,20 @@ fun ContinuousPageViewport(
     // A capture-only, non-destructive integration callback. The real editor
     // intentionally does not provide this callback or expose ERASER yet.
     onEraserSweepCaptured: (String, List<DuPoint>, Double) -> Unit = { _, _, _ -> },
+    shapeTool: EditorShapeTool? = null,
+    // Null disables creation while the rendered revision is not confirmed and idle.
+    shapeInputRevision: Long? = null,
+    onShapeCreated: (CompletedShapeCreation) -> Unit = {},
+    onShapeInputError: (String) -> Unit = {},
+    shapeEditing: Boolean = false,
+    shapeInputBlocked: Boolean = false,
+    onShapeSelectionChanged: (EditorShapeSelection?) -> Unit = {},
+    onShapeEdited: (CompletedShapeEdit) -> Unit = {},
 ) {
+    val latestOnShapeSelectionChanged by rememberUpdatedState(onShapeSelectionChanged)
+    val latestOnShapeEdited by rememberUpdatedState(onShapeEdited)
+    val latestOnShapeCreated by rememberUpdatedState(onShapeCreated)
+    val latestOnShapeInputError by rememberUpdatedState(onShapeInputError)
     val latestOnEraserSweepCaptured by
         rememberUpdatedState(onEraserSweepCaptured)
 
@@ -160,6 +187,12 @@ fun ContinuousPageViewport(
     // at pointer-down using the captured zoom. Configurable UI comes later.
     val eraserRadiusPx = with(density) { 12.dp.toPx().toDouble() }
     val gutterPx = with(density) { 16.dp.toPx().toDouble() }
+    val shapeMinimumSizePx = with(density) { 4.dp.toPx().toDouble() }
+    val shapePreviewRenderer = remember { CanonicalShapeCanvasRenderer.CommandRenderer() }
+    val shapeHitTest = remember { ShapeEditingHitTest() }
+    val shapeHandleRadiusPx = with(density) { 24.dp.toPx().toDouble() }
+    val shapeBodyTolerancePx = with(density) { 8.dp.toPx().toDouble() }
+    val shapeHandlePaintRadiusPx = with(density) { 6.dp.toPx() }
     val labelInsetPx = with(density) { 16.dp.toPx() }
     val labelBaselinePx = with(density) { 30.dp.toPx() }
     val detailBaselinePx = with(density) { 51.dp.toPx() }
@@ -193,6 +226,13 @@ fun ContinuousPageViewport(
         mutableStateOf<EditorInkTool?>(null)
     }
 
+    var liveShapePreview by remember(documentKey) {
+        mutableStateOf<ShapeCreationGesture.Preview?>(null)
+    }
+
+    var selectedShape by remember(documentKey) { mutableStateOf<EditorShapeSelection?>(null) }
+    var liveShapeEdit by remember(documentKey) { mutableStateOf<ShapeEditGesture.Preview?>(null) }
+
     // 2E-1: A lifecycle pause must invalidate an unfinished gesture,
     // even when the viewport remains in the composition.
     var inputSessionGeneration by remember(documentKey) {
@@ -218,6 +258,8 @@ fun ContinuousPageViewport(
                     inputSessionGeneration += 1
 
                     // Clear visual feedback immediately.
+                    liveShapePreview = null
+                    liveShapeEdit = null
                     livePenPreview = null
                     livePreviewTool = null
                 }
@@ -284,12 +326,12 @@ fun ContinuousPageViewport(
     // Cache canonical decoding separately from zoom/pan.
     // Keep only recently visible pages in memory.
     val decodedCache = remember(documentKey, storedPages) {
-        object : LinkedHashMap<String, List<StoredCanonicalStroke>>(
+        object : LinkedHashMap<String, PageElementRenderPlan.Decoded>(
             8, 0.75f, true
         ) {
             override fun removeEldestEntry(
                 eldest: MutableMap.MutableEntry<
-                    String, List<StoredCanonicalStroke>
+                    String, PageElementRenderPlan.Decoded
                     >?
             ): Boolean = size > 6
         }
@@ -297,7 +339,7 @@ fun ContinuousPageViewport(
 
     // Render plans depend on viewport geometry, but their
     // canonical sources do not. Only plan visible pages.
-    val strokePlans = remember(
+    val elementPlans = remember(
         layout, transform, viewportPx, storedPages
     ) {
         if (transform == null) {
@@ -335,19 +377,19 @@ fun ContinuousPageViewport(
                         val decoded = decodedCache.getOrPut(
                             positioned.id
                         ) {
-                            StoredCanonicalStrokeDecoder.fromPage(source)
+                            PageElementRenderPlan.decode(source)
                         }
 
-                        CanonicalStrokeRenderPlan.build(
+                        PageElementRenderPlan.build(
                             page = source,
                             positionedPage = positioned,
                             viewport = transform,
-                            decodedStrokes = decoded,
+                            decoded = decoded,
                         )
                     } catch (exception: RuntimeException) {
                         Log.w(
                             "ContinuousPageViewport",
-                            "Unable to prepare ink preview for page ${positioned.id}",
+                            "Unable to prepare element preview for page ${positioned.id}",
                             exception,
                         )
                         null
@@ -360,6 +402,33 @@ fun ContinuousPageViewport(
             }
         }
     }
+    val latestElementPlans by rememberUpdatedState(elementPlans)
+
+    // Refresh selection from the confirmed canonical row after save/undo/reopen updates.
+    LaunchedEffect(documentKey, shapeEditing, shapeTool, storedPages, shapeInputRevision) {
+        if (!shapeEditing || shapeTool == null) {
+            selectedShape = null
+            latestOnShapeSelectionChanged(null)
+        } else if (shapeInputRevision != null) {
+            val previous = selectedShape
+            if (previous != null) {
+                val source = storedPages[previous.pageId]?.elements?.singleOrNull {
+                    it.id == previous.elementId && it.kind == "shape"
+                }
+                val updated = source?.let {
+                    withContext(Dispatchers.Default) {
+                        runCatching { CanonicalShapeAdapter.decode(previous.pageId, it) }.getOrNull()
+                    }
+                }?.takeIf { !it.locked }
+                if (selectedShape === previous && (updated?.source != previous.shape.source ||
+                        previous.expectedRevision != shapeInputRevision)) {
+                    selectedShape = updated?.let { EditorShapeSelection(it, shapeInputRevision) }
+                    latestOnShapeSelectionChanged(selectedShape)
+                }
+            }
+        }
+    }
+
     val zoomPercent = transform?.let { current ->
         fitted?.let { initial ->
             ((current.scalePxPerDu / initial.scalePxPerDu) * 100.0).toInt()
@@ -375,7 +444,10 @@ fun ContinuousPageViewport(
             .background(surround)
             .clipToBounds()
             .semantics {
-                contentDescription = "Read-only note viewport with ${pages.size} pages"
+                contentDescription = if (shapeTool != null && shapeEditing)
+                    "Shape editing viewport with ${pages.size} pages"
+                else if (shapeTool != null) "Shape creation viewport with ${pages.size} pages"
+                else "Read-only note viewport with ${pages.size} pages"
                 stateDescription = "Zoom $zoomPercent percent; $selectionLabel"
             }
             .onSizeChanged { canvasSize = it }
@@ -387,17 +459,69 @@ fun ContinuousPageViewport(
                 fingerWritingPreview,
                 selectedTool,
                 eraserModeKey,
-                // A changed rendered snapshot invalidates an active eraser
-                // gesture; pen capture retains its original update behavior.
-                if (selectedTool == EditorInkTool.ERASER) storedPages else null,
+                shapeTool,
+                if (shapeTool != null) shapeEditing else false,
+                if (shapeTool != null) shapeInputBlocked else false,
+                if (shapeTool != null && shapeEditing) shapeHandleRadiusPx else null,
+                if (shapeTool != null && shapeEditing) shapeBodyTolerancePx else null,
+                if (shapeTool != null) shapeInputRevision else null,
+                if (shapeTool != null) shapeMinimumSizePx else null,
+                // Shape/eraser capture belongs to one confirmed rendered snapshot.
+                // Pen capture retains its original update behavior.
+                if (selectedTool == EditorInkTool.ERASER || shapeTool != null) storedPages else null,
                 lifecycleOwner,
                 inputSessionGeneration,
                 inputResumed,
             ) {
-                if (!inputResumed) return@pointerInput
+                if (!inputResumed || (shapeTool != null && shapeInputBlocked)) return@pointerInput
                 val owner = EditorGestureOwnership()
                 val capture = EditorPenCapture()
                 val eraser = EditorEraserViewportGestureRouter()
+                val shape = ShapeCreationGesture()
+                val shapeEdit = ShapeEditGesture { candidate, frame ->
+                    try {
+                        val page = layout.pages.single { it.id == candidate.original.pageId }
+                        shapePreviewRenderer.validate(candidate.original.kind, candidate.geometry,
+                            candidate.stroke, candidate.original.arrowHead,
+                            elementToViewportAffine(candidate.transform, page, frame.transform))
+                        true
+                    } catch (_: IllegalArgumentException) { false }
+                }
+
+                fun pickShape(point: PxPoint, frame: ShapeCreationGesture.Frame): ShapeEditGesture.Target? {
+                    val hit = ViewportInteraction.hitTestVisiblePage(
+                        point, layout, frame.transform, viewportPx,
+                    ) ?: return null
+                    val retained = latestElementPlans[hit.pageId] ?: return null
+                    val positioned = layout.pages.single { it.id == hit.pageId }
+                    val origin = ViewportGeometry.pageToViewport(DuPoint(0.0, 0.0), positioned, frame.transform)
+                    // Reproject the already-decoded visible plan with the actual camera. This
+                    // also works when more than six visible pages overflow the canonical cache.
+                    val plan = retained.copy(
+                        clipPx = PageStrokeClipPx(origin.x, origin.y,
+                            origin.x + positioned.widthDu * frame.transform.scalePxPerDu,
+                            origin.y + positioned.heightDu * frame.transform.scalePxPerDu),
+                        commands = retained.commands.map {
+                            if (it is PageElementCommand.Shape) it.copy(localToViewport =
+                                elementToViewportAffine(it.shape.elementTransform, positioned, frame.transform))
+                            else it
+                        },
+                    )
+                    val picked = shapeHitTest.pick(plan, point, viewportPx,
+                        selectedShape?.takeIf { it.pageId == hit.pageId }?.elementId,
+                        shapeHandleRadiusPx, shapeBodyTolerancePx)
+                    val selection = picked?.let { EditorShapeSelection(it.shape, frame.revision) }
+                    selectedShape = selection
+                    latestOnShapeSelectionChanged(selection)
+                    return picked?.let { ShapeEditGesture.Target(requireNotNull(selection), it.handle) }
+                }
+
+                fun shapeFrame(camera: ViewportTransform): ShapeCreationGesture.Frame? {
+                    val tool = shapeTool ?: return null
+                    val revision = shapeInputRevision ?: return null
+                    return ShapeCreationGesture.Frame(documentKey, inputSessionGeneration, revision,
+                        layout, viewportPx, camera, tool, shapeMinimumSizePx)
+                }
 
                 fun eraserFrame(camera: ViewportTransform) =
                     EditorEraserViewportGestureRouter.Frame(
@@ -426,6 +550,31 @@ fun ContinuousPageViewport(
                     effects.forEach { effect ->
                         when (effect) {
                             is EditorGestureOwnership.Effect.Started -> {
+                                if (shapeTool != null) {
+                                    val frame = cameraAtStart?.let(::shapeFrame)
+                                    if (shapeEditing) {
+                                        val point = initialPoint?.let { PxPoint(it.xPx, it.yPx) }
+                                        val target = if (point != null && frame != null) try {
+                                            pickShape(point, frame)
+                                        } catch (_: IllegalArgumentException) {
+                                            latestOnShapeInputError("Shape cannot be selected at this page size")
+                                            null
+                                        } else null
+                                        val started = target != null && point != null && frame != null &&
+                                            shapeEdit.begin(effect.stroke.pointerId, point, frame, target,
+                                                viewConfiguration.touchSlop.toDouble())
+                                        drawingPointerId = if (started) effect.stroke.pointerId else null
+                                        liveShapeEdit = shapeEdit.preview
+                                        return@forEach
+                                    }
+                                    val started = initialPoint != null && frame != null && shape.begin(
+                                        effect.stroke.pointerId, effect.stroke.pageId,
+                                        PxPoint(initialPoint.xPx, initialPoint.yPx), frame,
+                                    )
+                                    drawingPointerId = if (started) effect.stroke.pointerId else null
+                                    liveShapePreview = shape.preview
+                                    return@forEach
+                                }
                                 if (effect.stroke.tool == EditorInkTool.ERASER) {
                                     val started = initialPoint != null &&
                                         cameraAtStart != null &&
@@ -473,6 +622,69 @@ fun ContinuousPageViewport(
                                     drawingPointerId ==
                                     effect.stroke.pointerId
                                 ) {
+                                    if (shapeTool != null) {
+                                        val frame = session?.takeIf {
+                                            it.layout == layout && it.viewport == viewportPx &&
+                                                it.gutterPx == gutterPx
+                                        }?.transform?.let(::shapeFrame)
+                                        if (shapeEditing) {
+                                            val result = if (frame != null && releasePoint != null)
+                                                shapeEdit.finish(effect.stroke.pointerId, releasePoint, frame) else null
+                                            shapeEdit.cancel()
+                                            drawingPointerId = null
+                                            liveShapeEdit = null
+                                            when (result) {
+                                                is ShapeEditGesture.Result.Changed -> {
+                                                    val candidate = result.edit.candidate
+                                                    val page = layout.pages.single { it.id == result.edit.pageId }
+                                                    val mapping = elementToViewportAffine(candidate.transform,
+                                                        page, requireNotNull(frame).transform)
+                                                    val valid = try {
+                                                        shapePreviewRenderer.validate(candidate.original.kind,
+                                                            candidate.geometry, candidate.stroke,
+                                                            candidate.original.arrowHead, mapping)
+                                                        true
+                                                    } catch (_: IllegalArgumentException) {
+                                                        latestOnShapeInputError("Shape edit cannot be displayed; gesture cancelled")
+                                                        false
+                                                    }
+                                                    if (valid) latestOnShapeEdited(result.edit)
+                                                }
+                                                is ShapeEditGesture.Result.Rejected -> latestOnShapeInputError(result.reason)
+                                                ShapeEditGesture.Result.NoChange, null -> Unit
+                                            }
+                                            return@forEach
+                                        }
+                                        val completed = if (frame != null && releasePoint != null)
+                                            shape.finish(effect.stroke.pointerId, releasePoint, frame) else null
+                                        shape.cancel()
+                                        drawingPointerId = null
+                                        liveShapePreview = null
+                                        if (completed != null && frame != null) {
+                                            // Release can arrive before the first draw frame. Apply the
+                                            // painter's own validation before any creation can be admitted.
+                                            try {
+                                                val page = layout.pages.single { it.id == completed.pageId }
+                                                val origin = ViewportGeometry.pageToViewport(
+                                                    DuPoint(0.0, 0.0), page, frame.transform,
+                                                )
+                                                shapePreviewRenderer.validate(
+                                                    completed.tool.kind, completed.geometry,
+                                                    ShapeCreationDefaults.stroke,
+                                                    ShapeCreationDefaults.arrowHead.takeIf {
+                                                        completed.tool == EditorShapeTool.ARROW
+                                                    },
+                                                    StrokeViewportAffine(frame.transform.scalePxPerDu,
+                                                        0.0, 0.0, frame.transform.scalePxPerDu,
+                                                        origin.x, origin.y),
+                                                )
+                                                latestOnShapeCreated(completed)
+                                            } catch (_: IllegalArgumentException) {
+                                                latestOnShapeInputError("Shape cannot be displayed at this page size; gesture cancelled")
+                                            }
+                                        }
+                                        return@forEach
+                                    }
                                     if (effect.stroke.tool == EditorInkTool.ERASER) {
                                         val current = session?.takeIf {
                                             it.layout == layout &&
@@ -547,6 +759,10 @@ fun ContinuousPageViewport(
 
 
                             is EditorGestureOwnership.Effect.Cancelled -> {
+                                shape.cancel()
+                                shapeEdit.cancel()
+                                liveShapeEdit = null
+                                liveShapePreview = null
                                 eraser.cancel()
                                 capture.cancel()
                                 drawingPointerId = null
@@ -559,6 +775,24 @@ fun ContinuousPageViewport(
 
                 fun appendFromPointer(change: PointerInputChange) {
                     if (drawingPointerId != change.id.value) return
+
+                    if (shapeTool != null) {
+                        val frame = session?.takeIf {
+                            it.layout == layout && it.viewport == viewportPx && it.gutterPx == gutterPx
+                        }?.transform?.let(::shapeFrame)
+                        // Validate coalesced samples too: leaving and re-entering cannot resume a shape.
+                        val points = change.historical.map {
+                            PxPoint(it.position.x.toDouble(), it.position.y.toDouble())
+                        } + PxPoint(change.position.x.toDouble(), change.position.y.toDouble())
+                        val appended = frame != null && points.all {
+                            if (shapeEditing) shapeEdit.append(change.id.value, it, frame)
+                            else shape.append(change.id.value, it, frame)
+                        }
+                        if (!appended) processEffects(owner.onConfigurationChanged())
+                        else if (shapeEditing) liveShapeEdit = shapeEdit.preview
+                        else liveShapePreview = shape.preview
+                        return
+                    }
 
                     if (selectedTool == EditorInkTool.ERASER) {
                         val current = session?.takeIf {
@@ -687,7 +921,10 @@ fun ContinuousPageViewport(
                                         effects = owner.onDown(
                                             pointerId = change.id.value,
                                             contact = change.type.toEditorContact(),
-                                            selectedTool = selectedTool,
+                                            // Shape creation reuses the existing writing-contact policy.
+                                            // PEN here grants ownership only; no ink capture/codec is called.
+                                            selectedTool = if (shapeTool == null) selectedTool
+                                                else if (shapeInputRevision != null) EditorInkTool.PEN else null,
                                             fingerMode = fingerMode,
                                             fingerCount = fingerCount,
                                             pageId = pageId,
@@ -835,7 +1072,8 @@ fun ContinuousPageViewport(
                                     ?.let { change ->
                                         if (
                                             change.previousPressed &&
-                                            change.position != change.previousPosition
+                                            (change.position != change.previousPosition ||
+                                                (shapeTool != null && change.historical.isNotEmpty()))
                                         ) {
                                             appendFromPointer(change)
                                         }
@@ -873,6 +1111,16 @@ fun ContinuousPageViewport(
                                                     current.transform,
                                                     viewportPx,
                                                 )?.pageId
+                                            if (shapeEditing && shapeTool != null) {
+                                                shapeFrame(current.transform)?.let { frame ->
+                                                    try {
+                                                        pickShape(PxPoint(change.position.x.toDouble(),
+                                                            change.position.y.toDouble()), frame)
+                                                    } catch (_: IllegalArgumentException) {
+                                                        latestOnShapeInputError("Shape cannot be selected at this page size")
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
 
@@ -904,6 +1152,10 @@ fun ContinuousPageViewport(
                     }
                 } finally {
                     processEffects(owner.cancelAll())
+                    shape.cancel()
+                    shapeEdit.cancel()
+                    liveShapeEdit = null
+                    liveShapePreview = null
                     eraser.cancel()
                     capture.cancel()
                     drawingPointerId = null
@@ -932,21 +1184,60 @@ fun ContinuousPageViewport(
             drawRect(pageOutline, topLeft = Offset(left, top), size = Size(width, height),
                 style = Stroke(width = 1.dp.toPx()))
 
-            // EDT-07: Draw canonical ink from the persisted
-            // page snapshot, independently of capture state.
-            strokePlans[page.id]?.let { plan ->
+            // Retained ink and shapes share canonical element order and the owning page clip.
+            var unavailableCount = 0
+            elementPlans[page.id]?.let { retained ->
+                val editing = liveShapeEdit?.takeIf {
+                    it.candidate.original.pageId == page.id && it.frame.transform == active &&
+                        it.frame.revision == shapeInputRevision && shapeEditing
+                }?.candidate
+                // Substitute in place, preserving ink/shape painter order during the edit.
+                val plan = if (editing == null) retained else retained.copy(commands = retained.commands.map {
+                    if (it is PageElementCommand.Shape && it.elementId == editing.original.source.id)
+                        it.copy(geometryOverride = editing.geometry,
+                            localToViewport = elementToViewportAffine(editing.transform, page, active))
+                    else it
+                })
                 drawIntoCanvas { canvas ->
                     try {
-                        CanonicalStrokeCanvasRenderer.draw(
+                        unavailableCount = PageElementCanvasRenderer.draw(
                             canvas.nativeCanvas,
                             plan,
-                        )
+                        ).size
                     } catch (exception: RuntimeException) {
+                        unavailableCount = plan.commands.size + plan.unavailableElementIds.size
                         Log.w(
                             "ContinuousPageViewport",
-                            "Unable to draw ink preview for page ${page.id}",
+                            "Unable to draw element preview for page ${page.id}",
                             exception,
                         )
+                    }
+                }
+            }
+
+            liveShapePreview?.takeIf {
+                it.pageId == page.id && it.frame.transform == active &&
+                    it.frame.revision == shapeInputRevision && it.frame.tool == shapeTool
+            }?.let { preview ->
+                clipRect(left, top, left + width, top + height) {
+                    drawIntoCanvas { canvas ->
+                        try {
+                            shapePreviewRenderer.draw(
+                                canvas.nativeCanvas, preview.frame.tool.kind, preview.geometry,
+                                ShapeCreationDefaults.stroke, null,
+                                ShapeCreationDefaults.arrowHead.takeIf {
+                                    preview.frame.tool == EditorShapeTool.ARROW
+                                },
+                                StrokeViewportAffine(active.scalePxPerDu, 0.0, 0.0,
+                                    active.scalePxPerDu, origin.x, origin.y),
+                            )
+                        } catch (_: IllegalArgumentException) {
+                            // Invalidate the captured frame immediately, even if release arrives
+                            // before pointerInput restarts. Never submit an invisible creation.
+                            inputSessionGeneration += 1
+                            liveShapePreview = null
+                            latestOnShapeInputError("Shape cannot be displayed at this page size; gesture cancelled")
+                        }
                     }
                 }
             }
@@ -977,6 +1268,29 @@ fun ContinuousPageViewport(
                     }
                 }
 
+            if (shapeEditing && selectedShape?.pageId == page.id) {
+                elementPlans[page.id]?.let { plan ->
+                    val editing = liveShapeEdit?.takeIf {
+                        it.frame.transform == active && it.frame.revision == shapeInputRevision
+                    }?.candidate
+                    val command = plan.commands.filterIsInstance<PageElementCommand.Shape>()
+                        .singleOrNull { it.elementId == selectedShape?.elementId }?.let {
+                            if (editing?.original?.source?.id == it.elementId) it.copy(
+                                geometryOverride = editing.geometry,
+                                localToViewport = elementToViewportAffine(editing.transform, page, active),
+                            ) else it
+                        }
+                    if (command != null) clipRect(left, top, left + width, top + height) {
+                        shapeHitTest.handlePoints(command, plan, viewportPx).forEach { (_, point) ->
+                            val center = Offset(point.x.toFloat(), point.y.toFloat())
+                            drawCircle(Color.White, shapeHandlePaintRadiusPx, center)
+                            drawCircle(Color(0xFF2255AA), shapeHandlePaintRadiusPx, center,
+                                style = Stroke(width = 2.dp.toPx()))
+                        }
+                    }
+                }
+            }
+
             // The same page rectangle clips placeholder text now and will clip editable
             // elements and live stroke previews once those renderers exist.
             clipRect(left = left, top = top, right = left + width, bottom = top + height) {
@@ -986,7 +1300,8 @@ fun ContinuousPageViewport(
                     )
                     canvas.nativeCanvas.drawText(
                         "${page.widthDu} × ${page.heightDu} DU · " +
-                            "${pages[index].elementCount} stored element(s)",
+                            "${pages[index].elementCount} stored element(s)" +
+                            (if (unavailableCount > 0) " · $unavailableCount element(s) unavailable" else ""),
                         left + labelInsetPx, top + detailBaselinePx, detailPaint,
                     )
                 }

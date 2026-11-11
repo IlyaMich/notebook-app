@@ -43,16 +43,11 @@ internal object CanonicalStrokeCanvasRenderer {
                 return
             }
 
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                strokeCap = Paint.Cap.ROUND
-                strokeJoin = Paint.Join.ROUND
-            }
-
-            val path = Path()
+            val renderer = CommandRenderer()
 
             for (command in plan.strokes) {
                 try {
-                    drawStroke(canvas, paint, path, command)
+                    renderer.draw(canvas, command)
                 } catch (exception: IllegalArgumentException) {
                     Log.w(
                         "CanonicalInkRenderer",
@@ -63,6 +58,21 @@ internal object CanonicalStrokeCanvasRenderer {
             }
         } finally {
             canvas.restoreToCount(pageSaveCount)
+        }
+    }
+
+    /** Reusable page-scoped painter for the ordered mixed-element dispatcher.
+     * Caller supplies the page clip. Errors propagate so the dispatcher can report them.
+     */
+    class CommandRenderer {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        private val path = Path()
+
+        fun draw(canvas: Canvas, command: StrokeRenderCommand) {
+            drawStroke(canvas, paint, path, command)
         }
     }
 

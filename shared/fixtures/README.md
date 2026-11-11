@@ -2,6 +2,12 @@
 
 Synthetic compatibility artifacts for the agreed Document Model V0.2 and **provisional** `schemaVersion: 1` wire format. These files do not encode real user content and are not production migrations.
 
+## EDT-12 C1: shared semantic shape page
+
+`shapes/semantic_shapes_v1.json` is a synthetic canonical page JSON fixture, not a ZIP archive or a new schema. It contains ordered line, rectangle, ellipse and arrow envelopes with fractional DU geometry, nullable/non-null fill, opacity, lock state and invertible reflected/rotated/sheared transforms. Tiny dimensions, out-of-page geometry and an unrestricted finite arrow angle exercise existing validity rules without imposing Android interaction thresholds.
+
+`shared/validators/tests/test_shape_contract.py` wraps this page in a disposable schema-version-1 archive and checks the existing validator, including invalid variants. Android `CanonicalShapeAdapterTest` reads the same page via the existing `notebookFixturesDir` property. No existing golden ZIP is regenerated. These tests establish payload compatibility only; rendering, gestures and cross-platform edit/reopen evidence remain later gates.
+
 ## Checkpoint 1: positive mixed-content golden
 
 `valid/mixed_pages_v1.notebook` is a **committed ZIP archive** containing a manifest, four ordered pages, and two hashed assets. It covers:

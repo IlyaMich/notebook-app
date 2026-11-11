@@ -14,6 +14,12 @@ import com.notebook.app.data.local.entity.ElementEntity
 import com.notebook.app.data.local.entity.NoteEntity
 import com.notebook.app.data.local.entity.NotebookEntity
 import com.notebook.app.data.local.entity.PageEntity
+import com.notebook.app.ui.editor.shapes.CanonicalShapeAdapter
+import com.notebook.app.ui.editor.shapes.CanonicalShapeArrowHead
+import com.notebook.app.ui.editor.shapes.CanonicalShapeFill
+import com.notebook.app.ui.editor.shapes.CanonicalShapeGeometry
+import com.notebook.app.ui.editor.shapes.CanonicalShapeKind
+import com.notebook.app.ui.editor.shapes.CanonicalShapeStroke
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -124,6 +130,89 @@ class RoomDocumentRepositoryIntegrationTest {
         assertEquals(shapeJson, elements[1].envelopeJson)
         assertEquals(listOf(0L, 1L), elements.map { it.orderIndex })
         assertEquals(1L, repo.load(note.id).revision)
+    }
+
+    @Test fun allFourShapeAdaptersPersistInsertReplaceAndExactReopen() = runBlocking {
+        val note = fixture()
+        val page = repo.load(note.id).pages.single().id
+        val sentinel = stroke(id())
+        val shapes = canonicalShapes()
+        assertEquals(1L, repo.commit(note.id,
+            DocumentEdit.InsertElements(page, listOf(sentinel) + shapes)).revision)
+        val before = repo.load(note.id)
+        val replacements = before.pages.single().elements.drop(1).map { element ->
+            val shape = CanonicalShapeAdapter.decode(page, element)
+            CanonicalShapeAdapter.replace(shape,
+                stroke = shape.stroke.copy(widthDu = 4.125))
+        }
+        assertEquals(2L, repo.commitIfRevision(note.id, 1L,
+            DocumentEdit.ReplaceElements(page, replacements)).revision)
+        val expected = repo.load(note.id)
+        assertEquals(before.pages.single().elements.first(), expected.pages.single().elements.first())
+        assertEquals(before.pages.single().elements.map { it.id }, expected.pages.single().elements.map { it.id })
+        assertEquals(listOf(0L, 1L, 2L, 3L, 4L), expected.pages.single().elements.map { it.orderIndex })
+        assertEquals(listOf(sentinel) + replacements, expected.pages.single().elements.map { it.envelopeJson })
+        assertEquals(0L, expected.pages.single().revision)
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, file)
+        repo = RoomDocumentRepository(db)
+        assertEquals(expected, repo.load(note.id))
+        assertEquals(2L, repo.commitIfRevision(note.id, 2L,
+            DocumentEdit.ReplaceElements(page, replacements)).revision) // exact no-op
+    }
+
+    @Test fun invalidShapeBatchesStaleRevisionAndLockedReplacementLeaveSnapshotUnchanged() = runBlocking {
+        val note = fixture()
+        val page = repo.load(note.id).pages.single().id
+        val shapes = canonicalShapes()
+        val locked = shapes.last().replace("\"locked\":false", "\"locked\":true")
+        repo.commit(note.id, DocumentEdit.InsertElements(page, shapes.dropLast(1) + locked))
+        val before = repo.load(note.id)
+        val rows = before.pages.single().elements
+        val first = CanonicalShapeAdapter.decode(page, rows.first())
+        val validReplacement = CanonicalShapeAdapter.replace(first,
+            stroke = first.stroke.copy(widthDu = 5.0))
+        val rectangle = org.json.JSONObject(rows[1].envelopeJson)
+        rectangle.getJSONObject("payload").getJSONObject("geometry").put("width", 0)
+        expectError(LibraryErrorCode.INVALID_INPUT) {
+            repo.commitIfRevision(note.id, before.revision,
+                DocumentEdit.ReplaceElements(page, listOf(validReplacement, rectangle.toString())))
+        }
+        expectError(LibraryErrorCode.INVALID_INPUT) {
+            repo.commitIfRevision(note.id, 0L, DocumentEdit.ReplaceElements(page, listOf(validReplacement)))
+        }
+        expectError(LibraryErrorCode.PROTECTED_ENTITY) {
+            repo.commitIfRevision(note.id, before.revision,
+                DocumentEdit.ReplaceElements(page, listOf(validReplacement, locked.replace(
+                    "\"locked\":true", "\"locked\":false"))))
+        }
+        val invalidArrow = org.json.JSONObject(shapes.last())
+        invalidArrow.getJSONObject("payload").remove("arrowHead")
+        expectError(LibraryErrorCode.INVALID_INPUT) {
+            repo.commit(note.id, DocumentEdit.InsertElements(page, listOf(invalidArrow.toString())))
+        }
+        assertEquals(before, repo.load(note.id))
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, file)
+        repo = RoomDocumentRepository(db)
+        assertEquals(before, repo.load(note.id))
+    }
+
+    private fun canonicalShapes(): List<String> {
+        val style = CanonicalShapeStroke("#aBcDeF", 3.0, 0.75)
+        return CanonicalShapeKind.entries.map { kind ->
+            val geometry = when (kind) {
+                CanonicalShapeKind.LINE,
+                CanonicalShapeKind.ARROW ->
+                    CanonicalShapeGeometry.Endpoints(30.125, -2.25, 10.0, 50.625)
+                else -> CanonicalShapeGeometry.Frame(10.25, 20.125, 50.5, 30.75)
+            }
+            val raw = CanonicalShapeAdapter.create(id(), kind, geometry,
+                style, fill = CanonicalShapeFill("#F9E2E2", 0.5),
+                arrowHead = if (kind == CanonicalShapeKind.ARROW)
+                    CanonicalShapeArrowHead(12.0, -390.0) else null)
+            org.json.JSONObject(raw).put("transform", org.json.JSONArray("[1,0.25,0.5,2,5,-10]")).toString()
+        }
     }
 
     @Test fun transferBetweenPagesAndMoveNoteKeepEditableContent() = runBlocking {

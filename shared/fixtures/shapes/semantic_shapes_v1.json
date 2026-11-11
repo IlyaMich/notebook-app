@@ -1,0 +1,135 @@
+{
+  "id": "7d6acdd3-504f-4bb3-9c70-3ba7af56b4ba",
+  "size": {
+    "width": 612,
+    "height": 792
+  },
+  "background": {
+    "type": "blank",
+    "color": "#FFFFFF"
+  },
+  "elements": [
+    {
+      "id": "10000000-0000-4000-8000-000000000001",
+      "type": "shape",
+      "transform": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "locked": false,
+      "payload": {
+        "kind": "line",
+        "geometry": {
+          "x1": 30.125,
+          "y1": -2.25,
+          "x2": 10,
+          "y2": 50.625
+        },
+        "stroke": {
+          "color": "#aBcDeF",
+          "width": 0.125,
+          "opacity": 0
+        },
+        "fill": {
+          "color": "#123456",
+          "opacity": 0.25
+        }
+      }
+    },
+    {
+      "id": "10000000-0000-4000-8000-000000000002",
+      "type": "shape",
+      "transform": [
+        -1,
+        0,
+        0,
+        1,
+        200,
+        0
+      ],
+      "locked": false,
+      "payload": {
+        "kind": "rectangle",
+        "geometry": {
+          "x": 10.25,
+          "y": 20.125,
+          "width": 50.5,
+          "height": 30.75
+        },
+        "stroke": {
+          "color": "#008F70",
+          "width": 3,
+          "opacity": 1
+        },
+        "fill": {
+          "color": "#F9E2E2",
+          "opacity": 0.5
+        }
+      }
+    },
+    {
+      "id": "10000000-0000-4000-8000-000000000003",
+      "type": "shape",
+      "transform": [
+        0,
+        1,
+        -1,
+        0,
+        50,
+        10
+      ],
+      "locked": true,
+      "payload": {
+        "kind": "ellipse",
+        "geometry": {
+          "x": 0,
+          "y": 1,
+          "width": 0.000001,
+          "height": 24.5
+        },
+        "stroke": {
+          "color": "#2255AA",
+          "width": 2.5,
+          "opacity": 0.75
+        },
+        "fill": null
+      }
+    },
+    {
+      "id": "10000000-0000-4000-8000-000000000004",
+      "type": "shape",
+      "transform": [
+        1,
+        0.25,
+        0.5,
+        2,
+        5,
+        -10
+      ],
+      "locked": false,
+      "payload": {
+        "kind": "arrow",
+        "geometry": {
+          "x1": 10,
+          "y1": 100,
+          "x2": 100,
+          "y2": 20
+        },
+        "stroke": {
+          "color": "#C03030",
+          "width": 3,
+          "opacity": 0.8
+        },
+        "fill": null,
+        "arrowHead": {
+          "length": 12,
+          "angleDeg": -390
+        }
+      }
+    }
+  ]
+}

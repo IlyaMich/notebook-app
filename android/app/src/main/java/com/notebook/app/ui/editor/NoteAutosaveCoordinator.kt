@@ -4,6 +4,7 @@ import com.notebook.app.data.content.model.DocumentEdit
 import com.notebook.app.data.content.repository.DocumentRepository
 import com.notebook.app.ui.editor.ink.EditorEraserWholeStrokeRemovalPlanner
 import com.notebook.app.ui.editor.ink.EditorEraserPartialStrokeReplacementPlanner
+import com.notebook.app.ui.editor.shapes.ShapeEditPlan
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -22,7 +23,9 @@ enum class SaveRetryResult {
     RECONCILIATION_REQUIRED,
 }
 
-/** The result describes the FIRST attempt, not a later explicit retry. */
+/** The result describes the FIRST attempt, not a later explicit retry.
+ * Legacy public name retained for eraser callers; the shared queue also acknowledges shape edits.
+ */
 sealed interface EraserSessionCommitResult {
     data class Committed(val revision: Long) : EraserSessionCommitResult
     data class Rejected(val reason: String) : EraserSessionCommitResult
@@ -30,7 +33,7 @@ sealed interface EraserSessionCommitResult {
     data class Unconfirmed(val reason: String) : EraserSessionCommitResult
 }
 
-/** Only eraser operations have history here; EDT-18 will provide general undo. */
+/** Eraser projection of the shared session history; eligibility is top-entry-only. */
 data class EraserSessionHistoryState(
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
@@ -40,10 +43,10 @@ data class EraserSessionHistoryState(
 
 /**
  * Serializes completed document edits for one active note. The caller owns
- * [scope]; pending commands and eraser history are session-only, not durable.
+ * [scope]; pending commands and shape/eraser history are session-only, not durable.
  * Existing pen/page edits still use [enqueue] and the ordinary commit path.
  *
- * Whole-stroke eraser commands and their inverses share the SAME queue, but
+ * Shape/eraser commands and their inverses share the SAME queue, but
  * use conditional repository commits. They are admitted only when the queue
  * is idle, so they cannot overtake pending pen strokes.
  */
@@ -53,27 +56,30 @@ class NoteAutosaveCoordinator(
     private val scope: CoroutineScope,
     initialRevision: Long,
 ) {
-    private data class EraserHistoryEntry(
+    private enum class HistoryKind { ERASER, SHAPE }
+
+    private data class HistoryEntry(
         val forward: DocumentEdit,
         val inverse: DocumentEdit,
+        val kind: HistoryKind = HistoryKind.ERASER,
     )
 
     private sealed interface HistoryTransition {
-        val entry: EraserHistoryEntry
+        val entry: HistoryEntry
         val epoch: Long
 
-        data class Remove(
-            override val entry: EraserHistoryEntry,
+        data class Record(
+            override val entry: HistoryEntry,
             override val epoch: Long,
         ) : HistoryTransition
 
         data class Undo(
-            override val entry: EraserHistoryEntry,
+            override val entry: HistoryEntry,
             override val epoch: Long,
         ) : HistoryTransition
 
         data class Redo(
-            override val entry: EraserHistoryEntry,
+            override val entry: HistoryEntry,
             override val epoch: Long,
         ) : HistoryTransition
     }
@@ -89,8 +95,8 @@ class NoteAutosaveCoordinator(
     private val retryMutex = Mutex()
     private val tracker = NoteSaveStateTracker(initialRevision)
     private val pending = ArrayDeque<PendingCommand>()
-    private val undoStack = ArrayDeque<EraserHistoryEntry>()
-    private val redoStack = ArrayDeque<EraserHistoryEntry>()
+    private val undoStack = ArrayDeque<HistoryEntry>()
+    private val redoStack = ArrayDeque<HistoryEntry>()
     private var historyEpoch = 0L
 
     private val mutableState = MutableStateFlow(tracker.state)
@@ -99,12 +105,15 @@ class NoteAutosaveCoordinator(
     private val mutableHistory = MutableStateFlow(EraserSessionHistoryState())
     val eraserHistory: StateFlow<EraserSessionHistoryState> = mutableHistory.asStateFlow()
 
+    private val mutableShapeHistory = MutableStateFlow(ShapeSessionHistoryState())
+    internal val shapeHistory: StateFlow<ShapeSessionHistoryState> = mutableShapeHistory.asStateFlow()
+
     private var workerRunning = false
     private var needsReconciliation = false
 
     /**
      * Returns after queuing in memory, NOT after a durable commit.
-     * Invalidate eraser-only history on any non-eraser command, even if the
+     * Invalidate shape/eraser history on any unsupported command, even if the
      * command later fails; its inverse has not been registered by EDT-18.
      */
     fun enqueue(edit: DocumentEdit) {
@@ -116,7 +125,7 @@ class NoteAutosaveCoordinator(
             "Stroke removal/restoration requires a guarded eraser session command"
         }
         val startWorker = synchronized(lock) {
-            clearEraserHistory()
+            clearHistory()
             pending.addLast(PendingCommand(edit))
             publish(tracker.onCommandQueued())
             val start = !workerRunning && !needsReconciliation
@@ -149,7 +158,7 @@ class NoteAutosaveCoordinator(
             plan.inverseEdit.idsInOrder == plan.originalElementIdsInOrder &&
             removedIds.size == removedIds.toSet().size
         ) { "Eraser plan has inconsistent inverse data" }
-        val entry = EraserHistoryEntry(
+        val entry = HistoryEntry(
             forward = plan.forwardEdit.copy(ids = plan.forwardEdit.ids.toList()),
             inverse = plan.inverseEdit.copy(
                 envelopes = plan.inverseEdit.envelopes.toList(),
@@ -172,7 +181,7 @@ class NoteAutosaveCoordinator(
                 admitGuarded(
                     edit = entry.forward,
                     expectedRevision = plan.expectedNoteRevision,
-                    transition = HistoryTransition.Remove(entry, historyEpoch),
+                    transition = HistoryTransition.Record(entry, historyEpoch),
                     acknowledgement = acknowledgement,
                 )
                 true
@@ -252,7 +261,7 @@ class NoteAutosaveCoordinator(
         ) }
         val frozenOriginal = originals.toList()
         val frozenResult = resulting.toList()
-        val entry = EraserHistoryEntry(
+        val entry = HistoryEntry(
             forward = DocumentEdit.ApplyPartialStrokeReplacements(
                 plan.pageId, frozenOriginal, frozenResult, frozen,
             ),
@@ -275,7 +284,7 @@ class NoteAutosaveCoordinator(
                 admitGuarded(
                     edit = entry.forward,
                     expectedRevision = plan.expectedNoteRevision,
-                    transition = HistoryTransition.Remove(entry, historyEpoch),
+                    transition = HistoryTransition.Record(entry, historyEpoch),
                     acknowledgement = acknowledgement,
                 )
                 true
@@ -284,6 +293,37 @@ class NoteAutosaveCoordinator(
         if (accepted) launchDrain()
         return acknowledgement
     }
+
+    /** Shape plans are immutable and can only be constructed by the validated factories. */
+    internal fun submitShapeEdit(plan: ShapeEditPlan): Deferred<EraserSessionCommitResult> {
+        require(plan.noteId == noteId) { "Shape plan belongs to another note" }
+        val entry = HistoryEntry(plan.forwardEdit, plan.inverseEdit, HistoryKind.SHAPE)
+        val acknowledgement = CompletableDeferred<EraserSessionCommitResult>()
+        val accepted = synchronized(lock) {
+            if (!scope.isActive) {
+                acknowledgement.complete(EraserSessionCommitResult.Rejected("Editor session is closed"))
+                false
+            } else if (!idleForGuardedEdit()) {
+                acknowledgement.complete(EraserSessionCommitResult.Rejected("Autosave is not idle"))
+                false
+            } else if (tracker.state.committedRevision != plan.expectedNoteRevision) {
+                acknowledgement.complete(EraserSessionCommitResult.Rejected("Shape snapshot is stale"))
+                false
+            } else {
+                admitGuarded(entry.forward, plan.expectedNoteRevision,
+                    HistoryTransition.Record(entry, historyEpoch), acknowledgement)
+                true
+            }
+        }
+        if (accepted) launchDrain()
+        return acknowledgement
+    }
+
+    internal fun undoShapeEdit(): Deferred<EraserSessionCommitResult> =
+        submitHistoryAction(undo = true, kind = HistoryKind.SHAPE)
+
+    internal fun redoShapeEdit(): Deferred<EraserSessionCommitResult> =
+        submitHistoryAction(undo = false, kind = HistoryKind.SHAPE)
 
     /** Undo the latest *confirmed* eraser edit, whether whole or partial. */
     fun undoEraserEdit(): Deferred<EraserSessionCommitResult> = submitHistoryAction(undo = true)
@@ -297,15 +337,15 @@ class NoteAutosaveCoordinator(
     /** Redo the most recently *confirmed* eraser undo. */
     fun redoWholeStroke(): Deferred<EraserSessionCommitResult> = submitHistoryAction(undo = false)
 
-    private fun submitHistoryAction(undo: Boolean): Deferred<EraserSessionCommitResult> {
+    private fun submitHistoryAction(undo: Boolean, kind: HistoryKind = HistoryKind.ERASER): Deferred<EraserSessionCommitResult> {
         val acknowledgement = CompletableDeferred<EraserSessionCommitResult>()
         val accepted = synchronized(lock) {
             val entry = if (undo) undoStack.lastOrNull() else redoStack.lastOrNull()
             if (!scope.isActive) {
                 acknowledgement.complete(EraserSessionCommitResult.Rejected("Editor session is closed"))
                 false
-            } else if (!idleForGuardedEdit() || entry == null) {
-                acknowledgement.complete(EraserSessionCommitResult.Rejected("No available eraser ${if (undo) "undo" else "redo"}"))
+            } else if (!idleForGuardedEdit() || entry == null || entry.kind != kind) {
+                acknowledgement.complete(EraserSessionCommitResult.Rejected("No available ${kind.name.lowercase()} ${if (undo) "undo" else "redo"}"))
                 false
             } else {
                 val expected = tracker.state.committedRevision
@@ -326,7 +366,7 @@ class NoteAutosaveCoordinator(
     /** Called with [lock] held. */
     private fun idleForGuardedEdit(): Boolean =
         scope.isActive && !workerRunning && !needsReconciliation && pending.isEmpty() &&
-            tracker.state.phase == SavePhase.SAVED
+            tracker.state.phase == SavePhase.SAVED && tracker.state.committedRevision < Long.MAX_VALUE
 
     /** Called with [lock] held. */
     private fun admitGuarded(
@@ -431,11 +471,11 @@ class NoteAutosaveCoordinator(
                     check(result.revision >= tracker.state.committedRevision) {
                         "Commit revision moved backwards"
                     }
-                    // Every guarded eraser edit is a nonempty, changed command.
+                    // Every guarded history edit is a nonempty, changed command.
                     // A successful no-op must not create an undo entry.
                     if (command.expectedRevision != null) {
                         check(result.revision == command.expectedRevision + 1L) {
-                            "Guarded eraser command was not confirmed as a changed revision"
+                            "Guarded history command was not confirmed as a changed revision"
                         }
                     }
                     publish(tracker.onCommitSucceeded(result.revision))
@@ -474,7 +514,7 @@ class NoteAutosaveCoordinator(
     private fun applyHistoryTransition(transition: HistoryTransition?) {
         if (transition == null || historyEpoch != transition.epoch) return
         when (transition) {
-            is HistoryTransition.Remove -> {
+            is HistoryTransition.Record -> {
                 redoStack.clear()
                 undoStack.addLast(transition.entry)
             }
@@ -483,7 +523,7 @@ class NoteAutosaveCoordinator(
                     undoStack.removeLast()
                     redoStack.addLast(transition.entry)
                 } else {
-                    clearEraserHistory()
+                    clearHistory()
                 }
             }
             is HistoryTransition.Redo -> {
@@ -491,14 +531,14 @@ class NoteAutosaveCoordinator(
                     redoStack.removeLast()
                     undoStack.addLast(transition.entry)
                 } else {
-                    clearEraserHistory()
+                    clearHistory()
                 }
             }
         }
     }
 
     /** Called with [lock] held. */
-    private fun clearEraserHistory() {
+    private fun clearHistory() {
         historyEpoch++
         undoStack.clear()
         redoStack.clear()
@@ -508,10 +548,16 @@ class NoteAutosaveCoordinator(
     private fun publishHistory() {
         val idle = idleForGuardedEdit()
         mutableHistory.value = EraserSessionHistoryState(
-            canUndo = idle && undoStack.isNotEmpty(),
-            canRedo = idle && redoStack.isNotEmpty(),
-            undoDepth = undoStack.size,
-            redoDepth = redoStack.size,
+            canUndo = idle && undoStack.lastOrNull()?.kind == HistoryKind.ERASER,
+            canRedo = idle && redoStack.lastOrNull()?.kind == HistoryKind.ERASER,
+            undoDepth = undoStack.count { it.kind == HistoryKind.ERASER },
+            redoDepth = redoStack.count { it.kind == HistoryKind.ERASER },
+        )
+        mutableShapeHistory.value = ShapeSessionHistoryState(
+            canUndo = idle && undoStack.lastOrNull()?.kind == HistoryKind.SHAPE,
+            canRedo = idle && redoStack.lastOrNull()?.kind == HistoryKind.SHAPE,
+            undoDepth = undoStack.count { it.kind == HistoryKind.SHAPE },
+            redoDepth = redoStack.count { it.kind == HistoryKind.SHAPE },
         )
     }
 
