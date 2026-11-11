@@ -34,6 +34,30 @@ class SelectionLassoSuccessorCyclesTest {
         assertTrue("Expected Ready, got $r",r is Result.Ready)
         return (r as Result.Ready).value
     }
+    @Test fun cycleOwnershipPredicateIsPureAndSeparateFromClosedLifetime() {
+        for(input in listOf(emptyList(),square)) {
+            var armed=false; var calls=0
+            val b=SelectionQueryBudget(cancellationCheckpoint={calls++;if(armed)throw CancellationException()})
+            val p=prepare(input,b); val other=prepare(input)
+            try {
+                val c=cycles(p,permutation(p))
+                val counters=SelectionQueryResource.entries.associateWith { b.used(it) }
+                val failure=b.failure; val before=calls
+                armed=true
+                assertTrue(c.isOwnedBy(p)); assertFalse(c.isOwnedBy(other))
+                assertEquals(before,calls)
+                assertEquals(counters,SelectionQueryResource.entries.associateWith { b.used(it) })
+                assertSame(failure,b.failure)
+                p.close()
+                val closedCounters=SelectionQueryResource.entries.associateWith { b.used(it) }
+                assertTrue(c.isOwnedBy(p)); assertFalse(c.isOwnedBy(other))
+                assertEquals(before,calls)
+                assertEquals(closedCounters,SelectionQueryResource.entries.associateWith { b.used(it) })
+                assertThrows(IllegalStateException::class.java){c.walks}
+            } finally { p.close(); other.close() }
+        }
+    }
+
     private fun limits(resource: SelectionQueryResource,n: Long)=SelectionQueryLimits(
         query=SelectionQueryResource.entries.associateWith { if(it==resource)n else it.queryCeiling })
     private fun failure(r: Result): SelectionWorkloadFailure {
