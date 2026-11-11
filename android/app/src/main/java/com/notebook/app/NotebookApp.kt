@@ -48,12 +48,15 @@ data class NotebookRoute(val notebookId: String) : NavKey
 data class EditorRoute(val noteId: String) : NavKey
 
 @Composable
-fun NotebookApp() {
+fun NotebookApp(
+    repositoryOverride: LibraryRepositoryFactory? = null,
+) {
     val context = LocalContext.current.applicationContext
 
-    // Every destination uses the same production AppDatabase.
-    val repositories = remember(context) {
-        LibraryRepositoryFactory.from(context)
+    // Production uses its existing database. Tests may supply an
+    // isolated factory while exercising the real navigation host.
+    val repositories = remember(context, repositoryOverride) {
+        repositoryOverride ?: LibraryRepositoryFactory.from(context)
     }
     val lifecycle = remember(repositories) {
         repositories.noteLifecycle()
