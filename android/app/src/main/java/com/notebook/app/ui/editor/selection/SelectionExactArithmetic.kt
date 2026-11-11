@@ -261,6 +261,20 @@ internal class SelectionExactArithmetic(private val budget: SelectionQueryBudget
         retainRecord(160) // group, occurrence-list container and output slots
     }
 
+    /** Incident-list visits, associations, validation and ordering in the same query budget. */
+    internal fun chargeIncidentLassoWork(units: Long = 1) {
+        active()
+        consume(budget.charge(SelectionQueryResource.WORK_UNITS, units))
+    }
+
+    /** One additional directed record; all earlier atomic/group charges remain consumed. */
+    internal fun chargeIncidentLassoHalfEdge() {
+        active()
+        consume(budget.charge(SelectionQueryResource.ARRANGEMENT_EDGES))
+        chargeIncidentLassoWork()
+        retainRecord(160) // half-edge, cached ray and incident/output slots
+    }
+
     internal fun retainRecord(bytes: Long) { active(); reserve(bytes) }
     private fun signOf(n: Int) = when {
         n < 0 -> SelectionRobustPredicates.Sign.NEGATIVE

@@ -211,6 +211,63 @@ class SelectionExactArithmeticTest {
         }
     }
 
+    @Test fun incidentAdmissionRequiresActiveAttemptAndPreservesOriginalCounters() {
+        val b=SelectionQueryBudget()
+        val a=SelectionExactArithmetic(b)
+        assertThrows(IllegalStateException::class.java){a.chargeIncidentLassoWork()}
+        assertThrows(IllegalStateException::class.java){a.chargeIncidentLassoHalfEdge()}
+        known(a.attempt { chargeIncidentLassoWork(3); chargeIncidentLassoHalfEdge(); chargeIncidentLassoHalfEdge() })
+        assertEquals(5L,b.used(SelectionQueryResource.WORK_UNITS))
+        assertEquals(2L,b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+        assertEquals(320L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        a.close(); assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        assertThrows(IllegalStateException::class.java){a.chargeIncidentLassoHalfEdge()}
+    }
+
+    @Test fun incidentQuotaWorkAndRepresentationFailuresAreStickyAndReleaseArena() {
+        for((resource,limit) in listOf(SelectionQueryResource.ARRANGEMENT_EDGES to 0L,
+            SelectionQueryResource.WORK_UNITS to 0L,SelectionQueryResource.TEMPORARY_BYTES to 159L)) {
+            val limits=SelectionQueryResource.entries.associateWith { if(it==resource)limit else it.queryCeiling }
+            val b=SelectionQueryBudget(SelectionQueryLimits(query=limits))
+            SelectionExactArithmetic(b).use { a ->
+                val r=a.attempt { chargeIncidentLassoHalfEdge() }
+                assertTrue(r is SelectionPredicateResult.WorkloadExceeded)
+                assertEquals(resource,(r as SelectionPredicateResult.WorkloadExceeded).failure.resource)
+            }
+            assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertNotNull(b.failure)
+            SelectionExactArithmetic(b).use { a ->
+                assertTrue(a.attempt { chargeIncidentLassoWork() } is SelectionPredicateResult.WorkloadExceeded)
+            }
+        }
+    }
+
+    @Test fun incidentWorkAccountingDoesNotOverflowOrReset() {
+        val limits=SelectionQueryResource.entries.associateWith {
+            if(it==SelectionQueryResource.WORK_UNITS)Long.MAX_VALUE else it.queryCeiling
+        }
+        val b=SelectionQueryBudget(SelectionQueryLimits(query=limits))
+        SelectionExactArithmetic(b).use { a ->
+            known(a.attempt { chargeIncidentLassoWork(Long.MAX_VALUE) })
+            assertTrue(a.attempt { chargeIncidentLassoWork() } is SelectionPredicateResult.WorkloadExceeded)
+        }
+        assertEquals(Long.MAX_VALUE,b.used(SelectionQueryResource.WORK_UNITS))
+    }
+
+    @Test fun incidentCancellationReleasesEarlierReservationsAndRemainsSeparate() {
+        lateinit var b: SelectionQueryBudget
+        b=SelectionQueryBudget(cancellationCheckpoint={
+            if(b.used(SelectionQueryResource.ARRANGEMENT_EDGES)==1L)throw CancellationException()
+        })
+        SelectionExactArithmetic(b).use { a ->
+            known(a.attempt { retainRecord(32) })
+            assertThrows(CancellationException::class.java){a.attempt { chargeIncidentLassoHalfEdge() }}
+        }
+        assertNull(b.failure)
+        assertEquals(1L,b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+        assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+    }
+
     @Test fun coincidentHelpersRequireAttemptAndUseOriginalBudget() {
         val b=SelectionQueryBudget()
         val a=SelectionExactArithmetic(b)
