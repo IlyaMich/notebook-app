@@ -92,6 +92,29 @@ internal data class StrokeViewportAffine(
     }
 }
 
+
+
+/** Shared element-local DU -> viewport-PX composition; never changes the canonical affine. */
+internal fun elementToViewportAffine(
+    element: CanonicalElementAffine,
+    page: PositionedPage,
+    viewport: ViewportTransform,
+): StrokeViewportAffine {
+    require(viewport.scalePxPerDu.isFinite() && viewport.scalePxPerDu > 0.0)
+    require(viewport.translationXPx.isFinite() && viewport.translationYPx.isFinite())
+    require(page.originXDu.isFinite() && page.originYDu.isFinite())
+    val t = element.coefficients()
+    val scale = viewport.scalePxPerDu
+    return StrokeViewportAffine(
+        a = t[0] * scale,
+        b = t[1] * scale,
+        c = t[2] * scale,
+        d = t[3] * scale,
+        tx = (t[4] + page.originXDu) * scale + viewport.translationXPx,
+        ty = (t[5] + page.originYDu) * scale + viewport.translationYPx,
+    )
+}
+
 /**
  * One saved stroke prepared for a future drawing adapter.
  *
@@ -174,19 +197,7 @@ internal object CanonicalStrokeRenderPlan {
         }
 
         val commands = decodedStrokes.map { stroke ->
-                val t = stroke.elementTransform.coefficients()
-
-                // Compose element -> page -> document -> viewport.
-                val affine = StrokeViewportAffine(
-                    a = t[0] * scale,
-                    b = t[1] * scale,
-                    c = t[2] * scale,
-                    d = t[3] * scale,
-                    tx = (t[4] + positionedPage.originXDu) *
-                        scale + viewport.translationXPx,
-                    ty = (t[5] + positionedPage.originYDu) *
-                        scale + viewport.translationYPx,
-                )
+                val affine = elementToViewportAffine(stroke.elementTransform, positionedPage, viewport)
 
                 StrokeRenderCommand(
                     stroke = stroke,

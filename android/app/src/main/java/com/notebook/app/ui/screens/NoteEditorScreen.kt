@@ -36,6 +36,15 @@ import com.notebook.app.ui.editor.viewport.ContinuousPageViewport
 import com.notebook.app.ui.editor.viewport.toViewportSnapshot
 import androidx.compose.runtime.saveable.rememberSaveable
 import com.notebook.app.ui.editor.ink.EditorInkTool
+import com.notebook.app.ui.editor.NoteEditorShapeCommands
+import com.notebook.app.ui.editor.ShapeCommandResult
+import com.notebook.app.ui.editor.shapes.EditorShapeTool
+import com.notebook.app.ui.editor.shapes.EditorShapeSelection
+import com.notebook.app.ui.editor.shapes.CompletedShapeEdit
+import com.notebook.app.ui.editor.shapes.ShapeEditingGeometry
+import com.notebook.app.ui.editor.shapes.ShapeStyleControls
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * STO-06 vertical slice.
@@ -83,6 +92,13 @@ fun NoteEditorScreen(
     var selectedTool by rememberSaveable(noteId) {
         mutableStateOf(EditorInkTool.PEN)
     }
+    var selectedShapeTool by rememberSaveable(noteId) {
+        mutableStateOf<EditorShapeTool?>(null)
+    }
+    var shapeInputError by remember(noteId) { mutableStateOf<String?>(null) }
+    var shapeEditMode by rememberSaveable(noteId) { mutableStateOf(false) }
+    var selectedShape by remember(noteId) { mutableStateOf<EditorShapeSelection?>(null) }
+    var showShapeStyle by remember(noteId) { mutableStateOf(false) }
     var eraserMode by rememberSaveable(noteId) {
         mutableStateOf(NoteEditorEraserMode.PARTIAL)
     }
@@ -147,6 +163,67 @@ fun NoteEditorScreen(
     val eraserUiReady = NoteEditorEraserToolbarPolicy.canErase(
         saveState, content?.revision,
     )
+
+    val shapeHistoryState = coordinator?.shapeHistory?.collectAsState()?.value
+    val shapeUiReady = saveState?.phase == SavePhase.SAVED &&
+        saveState.pendingCommandCount == 0 && content?.revision == saveState.committedRevision &&
+        saveState.committedRevision < Long.MAX_VALUE
+
+    fun submitShapeEdit(completed: CompletedShapeEdit) {
+        val active = coordinator
+        val rendered = content
+        if (active == null || rendered == null || rendered.revision != completed.expectedRevision) {
+            shapeInputError = "Shape edit not applied: preview changed before completion"
+            return
+        }
+        scope.launch {
+            try {
+                val page = rendered.pages.singleOrNull { it.id == completed.pageId }
+                val envelope = withContext(Dispatchers.Default) {
+                    requireNotNull(page) { "Shape page is unavailable" }
+                    require(ShapeEditingGeometry.contained(completed.candidate, page.width, page.height)) {
+                        "Bring the entire painted shape inside its page before applying this edit"
+                    }
+                    completed.envelope()
+                }
+                shapeInputError = when (val result = NoteEditorShapeCommands(
+                    noteId, documentRepository, active,
+                ).replace(rendered, completed.pageId, envelope)) {
+                    is ShapeCommandResult.Committed, ShapeCommandResult.NoChange -> null
+                    is ShapeCommandResult.Rejected -> "Shape edit not applied: ${result.reason}"
+                    is ShapeCommandResult.Unconfirmed ->
+                        "Shape save outcome uncertain. Reload the note before performing more edits."
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (invalid: IllegalArgumentException) {
+                shapeInputError = "Shape edit not applied: ${invalid.message}"
+            } catch (_: Exception) {
+                shapeInputError = "Could not confirm shape save outcome. Reload the note before performing more edits."
+            }
+        }
+    }
+
+    fun performShapeHistoryAction(undo: Boolean) {
+        val active = coordinator ?: return
+        if (!shapeUiReady || !(if (undo) active.shapeHistory.value.canUndo
+                else active.shapeHistory.value.canRedo)) return
+        scope.launch {
+            try {
+                val result = if (undo) active.undoShapeEdit().await() else active.redoShapeEdit().await()
+                shapeInputError = when (result) {
+                    is EraserSessionCommitResult.Committed -> null
+                    is EraserSessionCommitResult.Rejected -> "Shape history not applied: ${result.reason}"
+                    is EraserSessionCommitResult.Unconfirmed ->
+                        "Shape history save outcome uncertain. Reload the note before performing more edits."
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                shapeInputError = "Could not confirm shape history outcome. Reload the note before performing more edits."
+            }
+        }
+    }
 
     fun performEraserHistoryAction(undo: Boolean) {
         val active = coordinator ?: return
@@ -306,6 +383,24 @@ fun NoteEditorScreen(
         )
     }
 
+    if (showShapeStyle && selectedShape != null && selectedShapeTool != null && shapeEditMode) {
+        val selection = requireNotNull(selectedShape)
+        AlertDialog(
+            onDismissRequest = { showShapeStyle = false },
+            title = { Text("Shape style") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(if (shapeUiReady) "Changes save automatically." else "Waiting for saved preview...")
+                    ShapeStyleControls(selection,
+                        enabled = shapeUiReady && selection.expectedRevision == content?.revision,
+                        onEdit = ::submitShapeEdit)
+                    shapeInputError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showShapeStyle = false }) { Text("Done") } },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -350,9 +445,12 @@ fun NoteEditorScreen(
                     }
 
                     FilterChip(
-                        selected = selectedTool == tool,
+                        selected = selectedShapeTool == null && selectedTool == tool,
                         enabled = tool != EditorInkTool.ERASER || eraserUiReady,
                         onClick = {
+                            selectedShapeTool = null
+                            selectedShape = null
+                            showShapeStyle = false
                             selectedTool = tool
                         },
                         label = {
@@ -361,10 +459,16 @@ fun NoteEditorScreen(
                     )
                 }
 
+                FilterChip(
+                    selected = selectedShapeTool != null,
+                    enabled = shapeUiReady,
+                    onClick = { selectedShapeTool = selectedShapeTool ?: EditorShapeTool.LINE },
+                    label = { Text("Shapes") },
+                )
+
                 // The remaining editor tools are not implemented yet.
                 listOf(
                     "Lasso",
-                    "Shapes",
                     "Text",
                     "Image",
                 ).forEach { tool ->
@@ -380,6 +484,32 @@ fun NoteEditorScreen(
                 }
 
             }
+            if (selectedShapeTool != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    EditorShapeTool.entries.forEach { tool ->
+                        FilterChip(
+                            selected = selectedShapeTool == tool && !shapeEditMode,
+                            enabled = shapeUiReady,
+                            onClick = {
+                                shapeEditMode = false
+                                showShapeStyle = false
+                                selectedShapeTool = tool
+                            },
+                            label = { Text(tool.label) },
+                        )
+                    }
+                    FilterChip(
+                        selected = shapeEditMode,
+                        enabled = shapeUiReady,
+                        onClick = { shapeEditMode = true },
+                        label = { Text("Edit shapes") },
+                    )
+                }
+            }
             TextButton(
                 onClick = {
                     fingerWritingPreview = !fingerWritingPreview
@@ -387,7 +517,15 @@ fun NoteEditorScreen(
                 modifier = Modifier.padding(start = 8.dp),
             ) {
                 Text(
-                    if (fingerWritingPreview) {
+                    if (selectedShapeTool != null) {
+                        if (shapeEditMode) {
+                            if (fingerWritingPreview) "Finger shape editing: ON"
+                            else "Enable finger shape editing"
+                        } else {
+                            if (fingerWritingPreview) "Finger shape drawing: ON"
+                            else "Enable finger shape drawing"
+                        }
+                    } else if (fingerWritingPreview) {
                         if (selectedTool == EditorInkTool.ERASER) {
                             "Finger eraser mode: ON"
                         } else {
@@ -403,7 +541,7 @@ fun NoteEditorScreen(
                 )
             }
 
-            if (selectedTool == EditorInkTool.ERASER) {
+            if (selectedShapeTool == null && selectedTool == EditorInkTool.ERASER) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -430,21 +568,38 @@ fun NoteEditorScreen(
             }
 
             Row(
-                modifier = Modifier.padding(horizontal = 8.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                TextButton(
-                    enabled = NoteEditorEraserToolbarPolicy.canUndo(
-                        saveState, content?.revision, eraserHistoryState,
-                    ),
-                    onClick = { performEraserHistoryAction(undo = true) },
-                ) { Text("Undo eraser") }
-                TextButton(
-                    enabled = NoteEditorEraserToolbarPolicy.canRedo(
-                        saveState, content?.revision, eraserHistoryState,
-                    ),
-                    onClick = { performEraserHistoryAction(undo = false) },
-                ) { Text("Redo eraser") }
+                if (selectedShapeTool != null) {
+                    TextButton(
+                        enabled = shapeUiReady && shapeHistoryState?.canUndo == true,
+                        onClick = { performShapeHistoryAction(undo = true) },
+                    ) { Text("Undo shape") }
+                    TextButton(
+                        enabled = shapeUiReady && shapeHistoryState?.canRedo == true,
+                        onClick = { performShapeHistoryAction(undo = false) },
+                    ) { Text("Redo shape") }
+                    if (shapeEditMode) {
+                        TextButton(
+                            enabled = shapeUiReady && selectedShape?.expectedRevision == content?.revision,
+                            onClick = { showShapeStyle = true },
+                        ) { Text("Shape style") }
+                    }
+                } else {
+                    TextButton(
+                        enabled = NoteEditorEraserToolbarPolicy.canUndo(
+                            saveState, content?.revision, eraserHistoryState,
+                        ),
+                        onClick = { performEraserHistoryAction(undo = true) },
+                    ) { Text("Undo eraser") }
+                    TextButton(
+                        enabled = NoteEditorEraserToolbarPolicy.canRedo(
+                            saveState, content?.revision, eraserHistoryState,
+                        ),
+                        onClick = { performEraserHistoryAction(undo = false) },
+                    ) { Text("Redo eraser") }
+                }
             }
 
             when {
@@ -501,6 +656,14 @@ fun NoteEditorScreen(
                         if (eraserInputError != null) {
                             Text(
                                 text = eraserInputError.orEmpty(),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+
+                        if (shapeInputError != null) {
+                            Text(
+                                text = shapeInputError.orEmpty(),
                                 color = MaterialTheme.colorScheme.error,
                                 style = MaterialTheme.typography.bodySmall,
                             )
@@ -659,6 +822,42 @@ fun NoteEditorScreen(
                         fingerWritingPreview = fingerWritingPreview,
                         selectedTool = selectedTool,
                         eraserModeKey = eraserMode.name,
+                        shapeTool = selectedShapeTool,
+                        shapeEditing = shapeEditMode,
+                        shapeInputBlocked = showShapeStyle,
+                        onShapeSelectionChanged = {
+                            selectedShape = it
+                            if (it == null) showShapeStyle = false
+                        },
+                        onShapeEdited = ::submitShapeEdit,
+                        shapeInputRevision = content?.revision.takeIf { shapeUiReady },
+                        onShapeInputError = { shapeInputError = it },
+                        onShapeCreated = { completed ->
+                            val active = coordinator
+                            val rendered = content
+                            if (active == null || rendered == null ||
+                                rendered.revision != completed.expectedRevision) {
+                                shapeInputError = "Shape not applied: preview changed before completion"
+                            } else {
+                                scope.launch {
+                                    try {
+                                        val envelope = withContext(Dispatchers.Default) { completed.envelope() }
+                                        shapeInputError = when (val result = NoteEditorShapeCommands(
+                                            noteId, documentRepository, active,
+                                        ).insert(rendered, completed.pageId, envelope)) {
+                                            is ShapeCommandResult.Committed, ShapeCommandResult.NoChange -> null
+                                            is ShapeCommandResult.Rejected -> "Shape not applied: ${result.reason}"
+                                            is ShapeCommandResult.Unconfirmed ->
+                                                "Shape save outcome uncertain. Reload the note before performing more edits."
+                                        }
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
+                                    } catch (_: Exception) {
+                                        shapeInputError = "Could not confirm shape save outcome. Reload the note before performing more edits."
+                                    }
+                                }
+                            }
+                        },
                         onPenStrokeCompleted = { pageId, envelopeJson ->
                             // Keep the existing 2C-2 autosave callback unchanged.
                             val activeCoordinator = coordinator
