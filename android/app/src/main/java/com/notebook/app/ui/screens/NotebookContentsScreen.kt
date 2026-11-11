@@ -43,6 +43,7 @@ import com.notebook.app.data.library.repository.NotebookRepository
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.launch
+import kotlin.coroutines.cancellation.CancellationException
 
 /** Repository-backed notebook screen. UI presentation never mutates note content. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -74,18 +75,48 @@ fun NotebookContentsScreen(
 
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(notebookId, refresh, contentVersion) {
-        try {
-            notebook = notebookRepository.findById(notebookId)
 
-            if (notebook == null || notebook?.deletedAtMillis != null) {
-                error = "Notebook is unavailable"
+    LaunchedEffect(
+        notebookId,
+        notebookRepository,
+        noteRepository,
+        refresh,
+        contentVersion,
+    ) {
+        // Never display notes or notebook metadata from a previous
+        // load while the current request is in progress.
+        notebook = null
+        notes = null
+        error = null
+
+        try {
+            val loadedNotebook = notebookRepository.findById(
+                notebookId
+            )
+
+            if (
+                loadedNotebook == null ||
+                loadedNotebook.deletedAtMillis != null
+            ) {
                 notes = emptyList()
+                error = "Notebook is unavailable"
             } else {
-                notes = noteRepository.listByNotebook(notebookId)
-                error = null
+                val loadedNotes = noteRepository.listByNotebook(
+                    notebookId
+                )
+
+                // Publish the successful result only after all
+                // required repository reads have completed.
+                notebook = loadedNotebook
+                notes = loadedNotes
             }
+        } catch (cancelled: CancellationException) {
+            // Navigation, disposal or a newer refresh can cancel
+            // this request. Cancellation is not a load failure.
+            throw cancelled
         } catch (exception: Exception) {
+            notebook = null
+            notes = emptyList()
             error = exception.message ?: "Could not load notes"
         }
     }

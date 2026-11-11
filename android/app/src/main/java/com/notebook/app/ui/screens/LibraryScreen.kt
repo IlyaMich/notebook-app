@@ -43,6 +43,7 @@ import com.notebook.app.data.library.repository.LibraryTrashRepository
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import kotlin.coroutines.cancellation.CancellationException
 
 private enum class NewLibraryItem { FOLDER, NOTEBOOK }
 
@@ -102,6 +103,8 @@ fun LibraryScreen(
                 folders = folderRepository.listByParent(parentFolderId),
                 notebooks = notebookRepository.listByParent(parentFolderId),
             )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (exception: Exception) {
             loadError = exception.message ?: "Could not load library"
         }
