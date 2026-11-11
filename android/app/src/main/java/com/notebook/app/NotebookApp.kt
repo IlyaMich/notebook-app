@@ -33,6 +33,7 @@ import com.notebook.app.ui.screens.NotebookContentsScreen
 import kotlinx.serialization.Serializable
 import com.notebook.app.ui.screens.LibraryWindowLayout
 import com.notebook.app.ui.screens.libraryWindowLayout
+import com.notebook.app.ui.screens.rememberLibrarySidebarExpansionState
 
 @Serializable
 data object LibraryRoute : NavKey
@@ -61,9 +62,9 @@ fun NotebookApp(
     val lifecycle = remember(repositories) {
         repositories.noteLifecycle()
     }
-
     val backStack = rememberNavBackStack(LibraryRoute)
-
+    val sidebarExpansionState =
+        rememberLibrarySidebarExpansionState()
     var editorBackRequests by remember {
         mutableIntStateOf(0)
     }
@@ -101,6 +102,7 @@ fun NotebookApp(
                     onOpenNotebook = { notebookId ->
                         backStack.add(NotebookRoute(notebookId))
                     },
+                    sidebarExpansionState = sidebarExpansionState,
                 )
             }
 
@@ -118,6 +120,7 @@ fun NotebookApp(
                     onOpenNotebook = { notebookId ->
                         backStack.add(NotebookRoute(notebookId))
                     },
+                    sidebarExpansionState = sidebarExpansionState,
                 )
             }
 
@@ -155,6 +158,7 @@ fun NotebookApp(
                                                 NotebookRoute(notebookId)
                                         }
                                     },
+                                    expansionState = sidebarExpansionState,
                                 )
                             }
 

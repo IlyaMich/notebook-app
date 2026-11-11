@@ -66,6 +66,7 @@ fun LibraryScreen(
     onOpenTrash: () -> Unit = {},
     onLibraryChanged: () -> Unit = {},
     contentVersion: Int = 0,
+    sidebarExpansionState: LibrarySidebarExpansionState? = null,
 ) {
     // Key navigation state by folder to prevent a prior folder's rows flashing in a new folder.
     var listing by remember(parentFolderId, folderRepository, notebookRepository) {
@@ -241,6 +242,7 @@ fun LibraryScreen(
                             onOpenFolder = onOpenFolder,
                             onOpenNotebook = onOpenNotebook,
                             contentVersion = refresh + contentVersion,
+                            expansionState = sidebarExpansionState,
                         )
                     }
 

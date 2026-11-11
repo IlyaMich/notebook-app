@@ -27,7 +27,6 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,7 +68,10 @@ internal fun LibraryHierarchySidebar(
     onOpenNotebook: (String) -> Unit,
     contentVersion: Int = 0,
     activeNotebookId: String? = null,
+    expansionState: LibrarySidebarExpansionState? = null,
 ) {
+    val sharedExpansionState =
+        expansionState ?: rememberLibrarySidebarExpansionState()
     var root by remember(folderRepository, notebookRepository) {
         mutableStateOf<SidebarChildren?>(null)
     }
@@ -198,6 +200,7 @@ internal fun LibraryHierarchySidebar(
                             onOpenFolder = onOpenFolder,
                             onOpenNotebook = onOpenNotebook,
                             contentVersion = contentVersion,
+                            expansionState = sharedExpansionState,
                         )
                     }
                 }
@@ -239,10 +242,9 @@ private fun SidebarFolderBranch(
     onOpenFolder: (String) -> Unit,
     onOpenNotebook: (String) -> Unit,
     contentVersion: Int,
+    expansionState: LibrarySidebarExpansionState,
 ) {
-    var expanded by rememberSaveable(folder.id) {
-        mutableStateOf(false)
-    }
+    val expanded = expansionState.isExpanded(folder.id)
     var children by remember(folder.id) {
         mutableStateOf<SidebarChildren?>(null)
     }
@@ -253,9 +255,13 @@ private fun SidebarFolderBranch(
         mutableIntStateOf(0)
     }
 
-    LaunchedEffect(folder.id, autoExpandFolderIds) {
+    LaunchedEffect(
+        folder.id,
+        autoExpandFolderIds,
+        expansionState,
+    ) {
         if (folder.id in autoExpandFolderIds) {
-            expanded = true
+            expansionState.setExpanded(folder.id, true)
         }
     }
 
@@ -307,7 +313,12 @@ private fun SidebarFolderBranch(
         ) {
             // This button only expands or collapses the tree.
             IconButton(
-                onClick = { expanded = !expanded },
+                onClick = {
+                    expansionState.setExpanded(
+                        folder.id,
+                        !expanded,
+                    )
+                },
                 modifier = Modifier
                     .size(48.dp)
                     .testTag("sidebar-expand-${folder.id}")
@@ -399,6 +410,7 @@ private fun SidebarFolderBranch(
                         onOpenFolder = onOpenFolder,
                         onOpenNotebook = onOpenNotebook,
                         contentVersion = contentVersion,
+                        expansionState = expansionState,
                     )
                 }
             }
