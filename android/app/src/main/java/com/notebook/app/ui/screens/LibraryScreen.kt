@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -42,6 +41,8 @@ import com.notebook.app.data.library.repository.FolderRepository
 import com.notebook.app.data.library.repository.NotebookRepository
 import com.notebook.app.data.library.repository.LibraryTrashRepository
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 
 private enum class NewLibraryItem { FOLDER, NOTEBOOK }
 
@@ -279,6 +280,7 @@ fun LibraryScreen(
     }
 }
 
+
 @Composable
 private fun LibraryFolderContents(
     modifier: Modifier,
@@ -292,71 +294,167 @@ private fun LibraryFolderContents(
     onTrash: (TrashRequest) -> Unit,
     canTrash: Boolean,
 ) {
-    Column(
-        modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp),
+    LazyColumn(
+        modifier = modifier
+            .testTag("library-contents")
+            .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(if (listing?.currentFolder == null) "My Library" else "Inside this folder",
-            style = MaterialTheme.typography.headlineSmall)
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Button(
-                onClick = { onNew(NewLibraryItem.FOLDER) },
-                enabled = listing != null && error == null,
-                modifier = Modifier.testTag("library-new-folder"),
-            ) { Text("New folder") }
-            Button(
-                onClick = { onNew(NewLibraryItem.NOTEBOOK) },
-                enabled = listing != null && error == null,
-                modifier = Modifier.testTag("library-new-notebook"),
-            ) { Text("New notebook") }
+        item(key = "library-header", contentType = "header") {
+            Text(
+                text = if (listing?.currentFolder == null) {
+                    "My Library"
+                } else {
+                    "Inside this folder"
+                },
+                style = MaterialTheme.typography.headlineSmall,
+            )
+        }
+
+        item(key = "library-create-actions", contentType = "actions") {
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Button(
+                    onClick = { onNew(NewLibraryItem.FOLDER) },
+                    enabled = listing != null && error == null,
+                    modifier = Modifier.testTag("library-new-folder"),
+                ) {
+                    Text("New folder")
+                }
+
+                Button(
+                    onClick = { onNew(NewLibraryItem.NOTEBOOK) },
+                    enabled = listing != null && error == null,
+                    modifier = Modifier.testTag("library-new-notebook"),
+                ) {
+                    Text("New notebook")
+                }
+            }
         }
 
         when {
             error != null -> {
-                Text(error, color = MaterialTheme.colorScheme.error)
-                TextButton(onClick = onRetry) { Text("Retry") }
+                item(key = "library-error", contentType = "error") {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = error,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+
+                        TextButton(onClick = onRetry) {
+                            Text("Retry")
+                        }
+                    }
+                }
             }
-            listing == null -> CircularProgressIndicator()
+
+            listing == null -> {
+                item(key = "library-loading", contentType = "loading") {
+                    CircularProgressIndicator()
+                }
+            }
+
             else -> {
-                Text("Folders", style = MaterialTheme.typography.titleLarge)
+                item(
+                    key = "library-folders-heading",
+                    contentType = "section-heading",
+                ) {
+                    Text(
+                        text = "Folders",
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                }
+
                 if (listing.folders.isEmpty()) {
-                    Text("No folders here")
+                    item(
+                        key = "library-folders-empty",
+                        contentType = "empty-state",
+                    ) {
+                        Text("No folders here")
+                    }
                 } else {
-                    listing.folders.forEach { folder ->
+                    items(
+                        items = listing.folders,
+                        key = { folder -> "folder:${folder.id}" },
+                        contentType = { "folder-card" },
+                    ) { folder ->
                         Card(
                             onClick = { onOpenFolder(folder.id) },
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 72.dp)
                                 .testTag("library-folder-${folder.id}"),
                         ) {
                             Column(Modifier.padding(16.dp)) {
-                                Text(folder.name, style = MaterialTheme.typography.titleMedium)
-                                Text("Open folder", style = MaterialTheme.typography.bodySmall)
+                                Text(
+                                    text = folder.name,
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+
+                                Text(
+                                    text = "Open folder",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+
                                 Row(
-                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                    modifier = Modifier.horizontalScroll(
+                                        rememberScrollState()
+                                    ),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
                                     TextButton(
-                                        onClick = { onManage(LibraryManagementRequest(
-                                            folder.forManagement(), LibraryManagementAction.RENAME,
-                                        )) },
-                                        modifier = Modifier.testTag("library-rename-folder-${folder.id}"),
-                                    ) { Text("Rename") }
+                                        onClick = {
+                                            onManage(
+                                                LibraryManagementRequest(
+                                                    folder.forManagement(),
+                                                    LibraryManagementAction.RENAME,
+                                                )
+                                            )
+                                        },
+                                        modifier = Modifier.testTag(
+                                            "library-rename-folder-${folder.id}"
+                                        ),
+                                    ) {
+                                        Text("Rename")
+                                    }
+
                                     TextButton(
-                                        onClick = { onManage(LibraryManagementRequest(
-                                            folder.forManagement(), LibraryManagementAction.MOVE,
-                                        )) },
-                                        modifier = Modifier.testTag("library-move-folder-${folder.id}"),
-                                    ) { Text("Move") }
+                                        onClick = {
+                                            onManage(
+                                                LibraryManagementRequest(
+                                                    folder.forManagement(),
+                                                    LibraryManagementAction.MOVE,
+                                                )
+                                            )
+                                        },
+                                        modifier = Modifier.testTag(
+                                            "library-move-folder-${folder.id}"
+                                        ),
+                                    ) {
+                                        Text("Move")
+                                    }
+
                                     if (canTrash) {
                                         TextButton(
-                                            onClick = { onTrash(TrashRequest(
-                                                TrashTargetKind.FOLDER, folder.id, folder.name,
-                                            )) },
-                                            modifier = Modifier.testTag("library-trash-folder-${folder.id}"),
-                                        ) { Text("Move to Trash") }
+                                            onClick = {
+                                                onTrash(
+                                                    TrashRequest(
+                                                        TrashTargetKind.FOLDER,
+                                                        folder.id,
+                                                        folder.name,
+                                                    )
+                                                )
+                                            },
+                                            modifier = Modifier.testTag(
+                                                "library-trash-folder-${folder.id}"
+                                            ),
+                                        ) {
+                                            Text("Move to Trash")
+                                        }
                                     }
                                 }
                             }
@@ -364,47 +462,110 @@ private fun LibraryFolderContents(
                     }
                 }
 
-                Text("Notebooks", style = MaterialTheme.typography.titleLarge)
+                item(
+                    key = "library-notebooks-heading",
+                    contentType = "section-heading",
+                ) {
+                    Text(
+                        text = "Notebooks",
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                }
+
                 if (listing.notebooks.isEmpty()) {
-                    Text("No notebooks here")
+                    item(
+                        key = "library-notebooks-empty",
+                        contentType = "empty-state",
+                    ) {
+                        Text("No notebooks here")
+                    }
                 } else {
-                    listing.notebooks.forEach { notebook ->
+                    items(
+                        items = listing.notebooks,
+                        key = { notebook -> "notebook:${notebook.id}" },
+                        contentType = { "notebook-card" },
+                    ) { notebook ->
                         Card(
                             onClick = { onOpenNotebook(notebook.id) },
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 80.dp)
                                 .testTag("library-notebook-${notebook.id}"),
                         ) {
                             Column(
                                 modifier = Modifier.padding(16.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
-                                Text(notebook.name, style = MaterialTheme.typography.titleMedium)
-                                Text(if (notebook.isQuickNotes) "Default notebook" else "Open notebook",
-                                    style = MaterialTheme.typography.bodySmall)
+                                Text(
+                                    text = notebook.name,
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+
+                                Text(
+                                    text = if (notebook.isQuickNotes) {
+                                        "Default notebook"
+                                    } else {
+                                        "Open notebook"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+
                                 Row(
-                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                    modifier = Modifier.horizontalScroll(
+                                        rememberScrollState()
+                                    ),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
                                     TextButton(
-                                        onClick = { onManage(LibraryManagementRequest(
-                                            notebook.forManagement(), LibraryManagementAction.RENAME,
-                                        )) },
-                                        modifier = Modifier.testTag("library-rename-notebook-${notebook.id}"),
-                                    ) { Text("Rename") }
+                                        onClick = {
+                                            onManage(
+                                                LibraryManagementRequest(
+                                                    notebook.forManagement(),
+                                                    LibraryManagementAction.RENAME,
+                                                )
+                                            )
+                                        },
+                                        modifier = Modifier.testTag(
+                                            "library-rename-notebook-${notebook.id}"
+                                        ),
+                                    ) {
+                                        Text("Rename")
+                                    }
+
                                     if (!notebook.isQuickNotes) {
                                         TextButton(
-                                            onClick = { onManage(LibraryManagementRequest(
-                                                notebook.forManagement(), LibraryManagementAction.MOVE,
-                                            )) },
-                                            modifier = Modifier.testTag("library-move-notebook-${notebook.id}"),
-                                        ) { Text("Move") }
+                                            onClick = {
+                                                onManage(
+                                                    LibraryManagementRequest(
+                                                        notebook.forManagement(),
+                                                        LibraryManagementAction.MOVE,
+                                                    )
+                                                )
+                                            },
+                                            modifier = Modifier.testTag(
+                                                "library-move-notebook-${notebook.id}"
+                                            ),
+                                        ) {
+                                            Text("Move")
+                                        }
+
                                         if (canTrash) {
                                             TextButton(
-                                                onClick = { onTrash(TrashRequest(
-                                                    TrashTargetKind.NOTEBOOK, notebook.id, notebook.name,
-                                                )) },
-                                                modifier = Modifier.testTag("library-trash-notebook-${notebook.id}"),
-                                            ) { Text("Move to Trash") }
+                                                onClick = {
+                                                    onTrash(
+                                                        TrashRequest(
+                                                            TrashTargetKind.NOTEBOOK,
+                                                            notebook.id,
+                                                            notebook.name,
+                                                        )
+                                                    )
+                                                },
+                                                modifier = Modifier.testTag(
+                                                    "library-trash-notebook-${notebook.id}"
+                                                ),
+                                            ) {
+                                                Text("Move to Trash")
+                                            }
                                         }
                                     }
                                 }
