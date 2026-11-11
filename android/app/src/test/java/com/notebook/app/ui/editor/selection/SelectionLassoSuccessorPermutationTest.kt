@@ -36,6 +36,30 @@ class SelectionLassoSuccessorPermutationTest {
         assertTrue("Expected Ready, got $r",r is Result.Ready)
         return (r as Result.Ready).value
     }
+    @Test fun permutationOwnerIdentityIsPureAndSeparateFromLiveness() {
+        for(input in listOf(emptyList(),square)) {
+            var armed=false; var callbacks=0
+            val b=SelectionQueryBudget(cancellationCheckpoint={callbacks++;if(armed)throw CancellationException()})
+            val owner=prepare(input,b); val other=prepare(input)
+            try {
+                val r=permutation(owner,adjacency(owner))
+                val counters=SelectionQueryResource.entries.associateWith { b.used(it) }
+                val failure=b.failure; val calls=callbacks
+                armed=true
+                assertTrue(r.isOwnedBy(owner)); assertFalse(r.isOwnedBy(other))
+                assertEquals(calls,callbacks)
+                assertEquals(counters,SelectionQueryResource.entries.associateWith { b.used(it) })
+                assertSame(failure,b.failure)
+                owner.close()
+                val after=SelectionQueryResource.entries.associateWith { b.used(it) }
+                assertTrue(r.isOwnedBy(owner)); assertFalse(r.isOwnedBy(other))
+                assertEquals(calls,callbacks)
+                assertEquals(after,SelectionQueryResource.entries.associateWith { b.used(it) })
+                assertThrows(IllegalStateException::class.java){r.links}
+            } finally { owner.close(); other.close() }
+        }
+    }
+
     @Test fun ownerMismatchNeverInvokesForeignCancellationOrChangesRetainedState() {
         for(input in listOf(emptyList(),square)) {
             val primaryBudget=SelectionQueryBudget()

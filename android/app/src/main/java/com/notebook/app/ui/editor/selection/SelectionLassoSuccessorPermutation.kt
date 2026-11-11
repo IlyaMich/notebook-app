@@ -26,6 +26,8 @@ internal object SelectionLassoSuccessorPermutation {
     ) {
         val links: List<Link> get() { owner.segments; return mapping }
         val adjacency: SelectionLassoIncidentAdjacency.Borrowed get() { owner.segments; return source }
+        internal fun isOwnedBy(prepared: Prepared): Boolean = owner === prepared
+
         fun <T> exact(action: SelectionExactArithmetic.() -> T): SelectionPredicateResult<T> = owner.exact(action)
     }
     private class Invalid(val reason: InvalidReason) : RuntimeException()
