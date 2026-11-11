@@ -211,6 +211,65 @@ class SelectionExactArithmeticTest {
         }
     }
 
+    @Test fun coincidentHelpersRequireAttemptAndUseOriginalBudget() {
+        val b=SelectionQueryBudget()
+        val a=SelectionExactArithmetic(b)
+        assertThrows(IllegalStateException::class.java){a.chargeCoincidentLassoWork()}
+        assertThrows(IllegalStateException::class.java){a.chargeCoincidentLassoEdgeGroup()}
+        known(a.attempt { chargeCoincidentLassoWork(3); chargeCoincidentLassoEdgeGroup() })
+        assertEquals(4L,b.used(SelectionQueryResource.WORK_UNITS))
+        assertEquals(1L,b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+        assertEquals(160L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        a.close()
+        assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        assertThrows(IllegalStateException::class.java){a.chargeCoincidentLassoWork()}
+    }
+
+    @Test fun coincidentGroupQuotaWorkAndMemoryDenialStayTypedAndReleaseArena() {
+        for((resource,maximum) in listOf(SelectionQueryResource.ARRANGEMENT_EDGES to 0L,
+            SelectionQueryResource.WORK_UNITS to 0L,SelectionQueryResource.TEMPORARY_BYTES to 159L)) {
+            val limits=SelectionQueryResource.entries.associateWith { if(it==resource)maximum else it.queryCeiling }
+            val b=SelectionQueryBudget(SelectionQueryLimits(query=limits))
+            SelectionExactArithmetic(b).use { a ->
+                val r=a.attempt { chargeCoincidentLassoEdgeGroup() }
+                assertTrue(r is SelectionPredicateResult.WorkloadExceeded)
+                assertEquals(resource,(r as SelectionPredicateResult.WorkloadExceeded).failure.resource)
+            }
+            assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertNotNull(b.failure)
+            SelectionExactArithmetic(b).use { a ->
+                assertTrue(a.attempt { chargeCoincidentLassoWork() } is SelectionPredicateResult.WorkloadExceeded)
+            }
+        }
+    }
+
+    @Test fun coincidentWorkCannotOverflowOrResetPreviouslyConsumedUnits() {
+        val limits=SelectionQueryResource.entries.associateWith {
+            if(it==SelectionQueryResource.WORK_UNITS)Long.MAX_VALUE else it.queryCeiling
+        }
+        val b=SelectionQueryBudget(SelectionQueryLimits(query=limits))
+        SelectionExactArithmetic(b).use { a ->
+            known(a.attempt { chargeCoincidentLassoWork(Long.MAX_VALUE) })
+            assertTrue(a.attempt { chargeCoincidentLassoWork() } is SelectionPredicateResult.WorkloadExceeded)
+        }
+        assertEquals(Long.MAX_VALUE,b.used(SelectionQueryResource.WORK_UNITS))
+        assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+    }
+
+    @Test fun coincidentGroupCancellationReleasesPreviouslyRetainedValues() {
+        lateinit var b: SelectionQueryBudget
+        b=SelectionQueryBudget(cancellationCheckpoint={
+            if(b.used(SelectionQueryResource.ARRANGEMENT_EDGES)==1L)throw CancellationException()
+        })
+        SelectionExactArithmetic(b).use { a ->
+            known(a.attempt { retainRecord(32) })
+            assertThrows(CancellationException::class.java){a.attempt { chargeCoincidentLassoEdgeGroup() }}
+        }
+        assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        assertEquals(1L,b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+        assertNull(b.failure)
+    }
+
     @Test fun atomicEdgeCancellationPropagatesBeforeAllocation() {
         lateinit var b: SelectionQueryBudget
         b=SelectionQueryBudget(cancellationCheckpoint={

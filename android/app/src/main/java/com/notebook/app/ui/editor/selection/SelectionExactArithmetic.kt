@@ -247,6 +247,20 @@ internal class SelectionExactArithmetic(private val budget: SelectionQueryBudget
         retainRecord(160)
     }
 
+    /** Meter endpoint visits, record preparation and ordering in coincident lasso construction. */
+    internal fun chargeCoincidentLassoWork(units: Long = 1) {
+        active()
+        consume(budget.charge(SelectionQueryResource.WORK_UNITS, units))
+    }
+
+    /** Additional retained geometry group; atomic occurrence quota is never reset or reused. */
+    internal fun chargeCoincidentLassoEdgeGroup() {
+        active()
+        consume(budget.charge(SelectionQueryResource.ARRANGEMENT_EDGES))
+        chargeCoincidentLassoWork()
+        retainRecord(160) // group, occurrence-list container and output slots
+    }
+
     internal fun retainRecord(bytes: Long) { active(); reserve(bytes) }
     private fun signOf(n: Int) = when {
         n < 0 -> SelectionRobustPredicates.Sign.NEGATIVE
