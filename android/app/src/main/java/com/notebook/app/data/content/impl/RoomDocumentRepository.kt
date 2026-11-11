@@ -1,6 +1,16 @@
 package com.notebook.app.data.content.impl
 
 import androidx.room.withTransaction
+import com.notebook.app.data.assets.RegisteredFinalizedImageDecoder
+import com.notebook.app.data.assets.VerifiedDecodedImageInfo
+import com.notebook.app.data.content.model.InsertVerifiedImageCommand
+import com.notebook.app.data.content.model.ValidatedInsertVerifiedImage
+import com.notebook.app.data.local.entity.AssetEntity
+import com.notebook.app.data.local.entity.ElementAssetReferenceEntity
+import java.io.File
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import org.json.JSONArray
 import com.notebook.app.data.content.model.DocumentCommit
 import com.notebook.app.data.content.model.DocumentEdit
 import com.notebook.app.data.content.model.StoredElement
@@ -16,13 +26,158 @@ import com.notebook.app.data.local.entity.ElementEntity
 import com.notebook.app.data.local.entity.PageEntity
 import org.json.JSONObject
 
+
+/**
+ * C2C-3C: transaction-time identity check against the previously leased,
+ * fully decoded original. Includes its canonical relative path; a matching
+ * digest/MIME/length alone is insufficient if the stored locator changed.
+ * This is a pure predicate: it does not verify or open files, acquire locks,
+ * authorize cleanup, or replace the pre-transaction integrity inspection.
+ */
+internal fun matchesVerifiedImageMetadata(
+    asset: AssetEntity,
+    verified: VerifiedDecodedImageInfo,
+): Boolean {
+    if (asset.id != verified.assetId || asset.state != "finalized" ||
+        asset.sha256 != verified.sha256 || asset.mimeType != verified.mimeType ||
+        asset.byteSize != verified.encodedBytes
+    ) return false
+    if (!Regex("[0-9a-f]{64}").matches(verified.sha256)) return false
+    val ext = when (verified.mimeType) {
+        "image/png" -> "png"
+        "image/jpeg" -> "jpg"
+        else -> return false
+    }
+    val sha = verified.sha256
+    return asset.relativePath ==
+        "assets/${sha.substring(0, 2)}/${sha.substring(2, 4)}/$sha.$ext"
+}
+
 /** Each successful command is one SQLite transaction and at most one revision advance.
  * The two-phase ordering writes rely on the V2 unique indexes. No UI caller may use raw DAOs.
  */
 class RoomDocumentRepository(
     private val db: AppDatabase,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val verifiedImageRoot: File? = null,
 ) : DocumentRepository {
+
+    /**
+     * C2C-3C-I2B: narrow internal image insertion. Not a DocumentEdit operation.
+     * Asset verification + full decode happen inside the single acquisition lease,
+     * followed by the repository-owned Room transaction under that same lease.
+     * The nullable root intentionally fails closed for existing production wiring.
+     */
+    internal suspend fun insertVerifiedImage(command: InsertVerifiedImageCommand): DocumentCommit {
+        val request = command.validated()
+        val root = verifiedImageRoot ?: fail(
+            LibraryErrorCode.UNSUPPORTED_CONTENT, "Verified image writer is not configured"
+        )
+        val decoder = RegisteredFinalizedImageDecoder(root, db.assetDao())
+        return decoder.withInspectedAssetLease(request.assetId) { verified ->
+            currentCoroutineContext().ensureActive()
+            insertVerifiedImageInTransaction(request, verified)
+        }
+    }
+
+    private suspend fun insertVerifiedImageInTransaction(
+        request: ValidatedInsertVerifiedImage,
+        verified: VerifiedDecodedImageInfo,
+    ): DocumentCommit = db.withTransaction {
+        currentCoroutineContext().ensureActive()
+        val note = db.noteDao().findById(request.noteId)
+            ?: fail(LibraryErrorCode.NOT_FOUND, "Image target note not found")
+        if (note.revision != request.expectedNoteRevision) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Stale image insertion: note revision changed")
+        }
+        if (note.deletedAtMillis != null) {
+            fail(LibraryErrorCode.INACTIVE_OWNER, "Image target note is in Trash")
+        }
+        val notebook = db.notebookDao().findById(note.notebookId)
+            ?: fail(LibraryErrorCode.INACTIVE_OWNER, "Image target notebook missing")
+        if (notebook.deletedAtMillis != null) {
+            fail(LibraryErrorCode.INACTIVE_OWNER, "Image target notebook is in Trash")
+        }
+        if (note.revision == Long.MAX_VALUE) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Note revision exhausted")
+        }
+        if (db.assetOwnershipDao().readFailClosedGateStatus() != "UNVERIFIED") {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image ownership safety gate rejects insertion")
+        }
+        val pages = db.pageDao().listByNote(note.id)
+        if (pages.isEmpty()) fail(LibraryErrorCode.INVALID_INPUT, "Missing first page")
+        requireContiguous(pages.map { it.orderIndex })
+        val page = ownedPage(pages, request.pageId)
+        // Generic media validation stays restrictive; the only privileged bypass is
+        // constructing this one canonical image envelope after full verification.
+        if (isPdfBackground(page.backgroundJson)) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF-backed image target is unsupported")
+        }
+        CanonicalContentValidator.background(page.backgroundJson)
+        rejectIndexedPageEdge(page.id)
+        val existing = elementsFor(page.id)
+        for (row in existing) {
+            if (isImageContent(row)) {
+                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Only first image on a safe page is supported")
+            }
+            val (canonicalId, canonicalKind) = CanonicalContentValidator.element(row.elementJson)
+            if (canonicalId != row.id || canonicalKind != row.kind) {
+                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Inconsistent existing element representation")
+            }
+        }
+        rejectIndexedElementEdges(existing)
+        if (db.elementDao().findById(request.elementId) != null ||
+            db.assetOwnershipDao().findElementReference(request.elementId) != null
+        ) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Image element ID already occupied")
+        }
+        val position = insertionAt(request.at, existing.size)
+        val asset = db.assetDao().findById(request.assetId)
+            ?: fail(LibraryErrorCode.NOT_FOUND, "Verified image metadata disappeared")
+        if (!matchesVerifiedImageMetadata(asset, verified)) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Verified image metadata changed")
+        }
+        val nextRevision = note.revision + 1L
+        val envelope = canonicalImageJson(request)
+        db.elementDao().insert(ElementEntity(
+            id = request.elementId, pageId = page.id,
+            orderIndex = existing.size.toLong(), kind = "image",
+            elementJson = envelope, revision = nextRevision,
+        ))
+        db.assetOwnershipDao().insertElementReference(
+            ElementAssetReferenceEntity(request.elementId, request.assetId)
+        )
+        if (position != existing.size) {
+            val order = existing.map { it.id }.toMutableList().also {
+                it.add(position, request.elementId)
+            }
+            setElementOrder(db.elementDao().listByPage(page.id), order, nextRevision)
+        }
+        currentCoroutineContext().ensureActive()
+        val now = maxOf(clock(), note.updatedAtMillis)
+        check(db.noteDao().update(note.copy(revision = nextRevision, updatedAtMillis = now)) == 1)
+        currentCoroutineContext().ensureActive()
+        DocumentCommit(note.id, nextRevision, now)
+    }
+
+    private fun canonicalImageJson(request: ValidatedInsertVerifiedImage): String {
+        val frame = JSONObject()
+            .put("x", request.frame.x)
+            .put("y", request.frame.y)
+            .put("width", request.frame.width)
+            .put("height", request.frame.height)
+        val payload = JSONObject()
+            .put("assetId", request.assetId)
+            .put("frame", frame)
+            .put("opacity", request.opacity)
+        return JSONObject()
+            .put("id", request.elementId)
+            .put("type", "image")
+            .put("transform", JSONArray(request.transform))
+            .put("locked", false)
+            .put("payload", payload)
+            .toString()
+    }
 
     override suspend fun load(noteId: String): StoredNoteContent = db.withTransaction {
         val id = LibraryValidation.canonicalId(noteId)
