@@ -53,14 +53,32 @@ internal fun matchesVerifiedImageMetadata(
         "assets/${sha.substring(0, 2)}/${sha.substring(2, 4)}/$sha.$ext"
 }
 
+/** Internal test-only injection token, not available through DocumentRepository. */
+internal class VerifiedImagePrecommitTestHook(val callback: suspend () -> Unit)
+
 /** Each successful command is one SQLite transaction and at most one revision advance.
  * The two-phase ordering writes rely on the V2 unique indexes. No UI caller may use raw DAOs.
  */
-class RoomDocumentRepository(
+class RoomDocumentRepository private constructor(
     private val db: AppDatabase,
-    private val clock: () -> Long = System::currentTimeMillis,
-    private val verifiedImageRoot: File? = null,
+    private val clock: () -> Long,
+    private val verifiedImageRoot: File?,
+    private val afterVerifiedImageEdgeInsertedForProcessDeathTest: (suspend () -> Unit)?,
 ) : DocumentRepository {
+    /** Normal repository construction never exposes or installs the test seam. */
+    constructor(
+        db: AppDatabase,
+        clock: () -> Long = System::currentTimeMillis,
+        verifiedImageRoot: File? = null,
+    ) : this(db, clock, verifiedImageRoot, null)
+
+    /** Internal test-only constructor: immutable callback, acquired-lease -> Room order unchanged. */
+    internal constructor(
+        db: AppDatabase,
+        clock: () -> Long,
+        verifiedImageRoot: File,
+        hook: VerifiedImagePrecommitTestHook,
+    ) : this(db, clock, verifiedImageRoot, hook.callback)
 
     /**
      * C2C-3C-I2B: narrow internal image insertion. Not a DocumentEdit operation.
@@ -147,6 +165,10 @@ class RoomDocumentRepository(
         db.assetOwnershipDao().insertElementReference(
             ElementAssetReferenceEntity(request.elementId, request.assetId)
         )
+        // Host-driven test-only pause AFTER both owner rows are written but
+        // BEFORE the outer Room transaction commits. Default null is inert.
+        // Never acquire an asset lease or register files from this callback.
+        afterVerifiedImageEdgeInsertedForProcessDeathTest?.invoke()
         if (position != existing.size) {
             val order = existing.map { it.id }.toMutableList().also {
                 it.add(position, request.elementId)
