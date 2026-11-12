@@ -23,6 +23,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import androidx.compose.ui.test.onNodeWithTag
 
 /** UI-to-real-Room wiring with an isolated, disposable database. */
 @RunWith(AndroidJUnit4::class)
@@ -47,7 +48,9 @@ class AndroidLibraryUiSmokeTest {
         context.deleteDatabase(dbName)
     }
 
-    @Test fun rootLibraryProvisionsQuickNotesAndShowsRealNotebooks() {
+
+    @Test
+    fun rootLibraryProvisionsQuickNotesAndShowsRealNotebooks() {
         compose.setContent {
             MaterialTheme {
                 LibraryScreen(
@@ -58,11 +61,28 @@ class AndroidLibraryUiSmokeTest {
                 )
             }
         }
+
+        // Wait for initial Quick Notes provisioning.
         compose.waitUntil(10_000L) {
-            compose.onAllNodesWithText("Quick Notes").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText("Quick Notes")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
         }
-        compose.onNodeWithText("Quick Notes").assertExists()
-        assertEquals(1, runBlocking { repositories.notebooks.listByParent(null).size })
+
+        val rootNotebooks = runBlocking {
+            repositories.notebooks.listByParent(null)
+        }
+
+        assertEquals(1, rootNotebooks.size)
+
+        val quickNotes = rootNotebooks.single()
+        assertEquals(true, quickNotes.isQuickNotes)
+
+        // Verify the real library contents card, not the separate
+        // tablet sidebar entry displaying the same notebook.
+        compose.onNodeWithTag(
+            "library-notebook-${quickNotes.id}"
+        ).assertExists()
     }
 
     @Test fun createFromNotebookScreenWritesFirstPageToRoom() {
