@@ -145,6 +145,51 @@ class SelectionLassoIntercomponentRayContactsTest {
     ) = SelectionLassoGraphComponents.Borrowed(owner, admission, source.components, vertices,
         source.edgeGroupToComponent, source.halfEdgeToComponent, source.walkToComponent)
 
+    @Test fun authenticationIsPureOwnerBoundAndSyntheticConstructorsCannotMintIt() {
+        var armed = false; var callbacks = 0
+        val b = SelectionQueryBudget(cancellationCheckpoint = { callbacks++; if (armed) throw CancellationException() })
+        vertexTie(b).use { f ->
+            val genuine = build(f)
+            val other = known(SelectionLassoSplitEvents.prepare(emptyList(), SelectionQueryBudget()))
+            try {
+                val clone = SelectionLassoIntercomponentRayContacts.Borrowed(f.owner, genuine.exterior, genuine.records)
+                val subclass = object : SelectionLassoIntercomponentRayContacts.Borrowed(
+                    f.owner, genuine.exterior, genuine.records) {}
+                val before = callbacks
+                val counters = SelectionQueryResource.entries.map { b.used(it) }
+                val failure = b.failure
+                armed = true
+                assertTrue(genuine.isAuthenticatedFor(f.owner))
+                assertFalse(genuine.isAuthenticatedFor(other))
+                assertFalse(clone.isAuthenticatedFor(f.owner))
+                assertFalse(subclass.isAuthenticatedFor(f.owner))
+                assertEquals(before, callbacks)
+                assertEquals(counters, SelectionQueryResource.entries.map { b.used(it) })
+                assertSame(failure, b.failure)
+                f.owner.close()
+                assertTrue(genuine.isAuthenticatedFor(f.owner)) // provenance is separate from liveness
+                assertEquals(before, callbacks)
+                assertThrows(IllegalStateException::class.java) { genuine.records }
+                assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            } finally { other.close() }
+        }
+    }
+    @Test fun authenticatedInventoryIsImmutableAndCannotBeTransferredToSyntheticReplacement() {
+        vertexTie().use { f ->
+            val genuine = build(f)
+            val count = genuine.records.size
+            val replacement = genuine.records.toMutableList()
+            val fake = SelectionLassoIntercomponentRayContacts.Borrowed(f.owner, genuine.exterior, replacement)
+            replacement.clear()
+            assertFalse(fake.isAuthenticatedFor(f.owner))
+            assertTrue(genuine.isAuthenticatedFor(f.owner))
+            assertEquals(count, genuine.records.size)
+            assertThrows(UnsupportedOperationException::class.java) { (genuine.records as MutableList).clear() }
+            val contact = genuine.records.filterIsInstance<FirstContact>().single()
+            assertThrows(UnsupportedOperationException::class.java) { (contact.contacts as MutableList).clear() }
+        }
+    }
+
     @Test fun emptyAndIsolatedInventNoProbe() {
         production(emptyList()).use { assertTrue(build(it).records.isEmpty()) }
         graph(listOf(p(0, 0), p(1, 1)), emptyList()).use {

@@ -55,7 +55,7 @@ internal object SelectionLassoIntercomponentRayContacts {
         data class InvalidInput(val reason: InvalidReason) : Result
         data class Unresolved(val cause: SelectionPredicateResult<Nothing>) : Result
     }
-    class Borrowed internal constructor(
+    open class Borrowed internal constructor(
         private val owner: Prepared, private val source: SelectionLassoExteriorSectorEvidence.Borrowed,
         private val inventory: List<Evidence>,
     ) {
@@ -63,8 +63,17 @@ internal object SelectionLassoIntercomponentRayContacts {
         val components: SelectionLassoGraphComponents.Borrowed get() { owner.segments; return source.components }
         val records: List<Evidence> get() { owner.segments; return inventory }
         internal fun isOwnedBy(prepared: Prepared) = owner === prepared
+        /** Pure provenance check; liveness remains the getter/owner contract. Cannot be overridden. */
+        internal fun isAuthenticatedFor(prepared: Prepared): Boolean = owner === prepared && this is Completed
         fun <T> exact(action: SelectionExactArithmetic.() -> T) = owner.exact(action)
     }
+    /** Private final subtype: only this object's private publication path can mint it.
+     * Ordinary internal constructors and subclasses cannot claim completion. No registry/token
+     * escapes, and authentication does not certify the provenance of upstream admissions.
+     */
+    private class Completed(owner: Prepared, source: SelectionLassoExteriorSectorEvidence.Borrowed,
+        inventory: List<Evidence>) : Borrowed(owner, source, inventory)
+
     private class Invalid(val reason: InvalidReason) : RuntimeException()
     private class Unresolved(val outcome: SelectionPredicateResult<Nothing>) : RuntimeException()
     private fun verify(ok: Boolean, reason: InvalidReason) { if (!ok) throw Invalid(reason) }
@@ -282,6 +291,6 @@ internal object SelectionLassoIntercomponentRayContacts {
         owner: Prepared, source: SelectionLassoExteriorSectorEvidence.Borrowed, output: ArrayList<Evidence>,
     ): Borrowed {
         chargeIncidentLassoWork(output.size.toLong() + 1)
-        return Borrowed(owner, source, Collections.unmodifiableList(output))
+        return Completed(owner, source, Collections.unmodifiableList(output))
     }
 }
