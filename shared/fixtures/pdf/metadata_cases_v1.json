@@ -1,0 +1,177 @@
+{
+  "contract": "pdf-page-metadata-v1",
+  "description": "Synthetic root-to-leaf PDF page-tree metadata snapshots. These are NOT parsed PDF files. Golden results are independent constants. Only MediaBox, CropBox and Rotate inherit; UserUnit is page-local. Rectangle corners are ordered lower-left, lower-right, upper-right, upper-left in PDF source space.",
+  "validCases": [
+    {
+      "id": "inherited-root-r90",
+      "nodes": [
+        {"mediaBox": [0, 0, 300, 400], "cropBox": [20, 30, 220, 330], "rotate": 90},
+        {},
+        {}
+      ],
+      "expected": {
+        "mediaBox": [0, 0, 300, 400], "cropBox": [20, 30, 220, 330],
+        "rotation": 90, "userUnit": 1, "pageSize": [300, 200],
+        "points": [
+          {"source": [20, 30], "canonical": [0, 0]},
+          {"source": [220, 330], "canonical": [300, 200]},
+          {"source": [80, 100], "canonical": [70, 60]},
+          {"source": [10, 20], "canonical": [-10, -10]}
+        ],
+        "rectangle": {
+          "source": [40, 60, 100, 120],
+          "canonicalCorners": [[30, 20], [30, 80], [90, 80], [90, 20]],
+          "canonicalBounds": [30, 20, 90, 80]
+        }
+      }
+    },
+    {
+      "id": "intermediate-overrides-r180-scaled",
+      "nodes": [
+        {"mediaBox": [0, 0, 500, 600], "cropBox": [20, 30, 220, 330], "rotate": 90},
+        {"cropBox": [100, 150, 400, 500], "rotate": 180},
+        {"userUnit": 2}
+      ],
+      "expected": {
+        "mediaBox": [0, 0, 500, 600], "cropBox": [100, 150, 400, 500],
+        "rotation": 180, "userUnit": 2, "pageSize": [600, 700],
+        "points": [
+          {"source": [100, 150], "canonical": [600, 0]},
+          {"source": [400, 500], "canonical": [0, 700]},
+          {"source": [200, 225], "canonical": [400, 150]}
+        ],
+        "rectangle": {
+          "source": [100, 150, 200, 225],
+          "canonicalCorners": [[600, 0], [400, 0], [400, 150], [600, 150]],
+          "canonicalBounds": [400, 0, 600, 150]
+        }
+      }
+    },
+    {
+      "id": "positive-450-overrides-negative-rotation",
+      "nodes": [
+        {"mediaBox": [-100, -50, 200, 150], "rotate": -90, "userUnit": 7},
+        {"rotate": 450},
+        {}
+      ],
+      "expected": {
+        "mediaBox": [-100, -50, 200, 150], "cropBox": [-100, -50, 200, 150],
+        "rotation": 90, "userUnit": 1, "pageSize": [200, 300],
+        "points": [
+          {"source": [-100, -50], "canonical": [0, 0]},
+          {"source": [200, 150], "canonical": [200, 300]},
+          {"source": [0, 0], "canonical": [50, 100]}
+        ],
+        "rectangle": {
+          "source": [-50, -25, 50, 75],
+          "canonicalCorners": [[25, 50], [25, 150], [125, 150], [125, 50]],
+          "canonicalBounds": [25, 50, 125, 150]
+        }
+      }
+    },
+    {
+      "id": "negative-450-intersection-r270",
+      "nodes": [
+        {"mediaBox": [0, 0, 400, 250], "cropBox": [-25, 40, 240, 320], "rotate": 0},
+        {},
+        {"rotate": -450, "userUnit": 1.5}
+      ],
+      "expected": {
+        "mediaBox": [0, 0, 400, 250], "cropBox": [0, 40, 240, 250],
+        "rotation": 270, "userUnit": 1.5, "pageSize": [315, 360],
+        "points": [
+          {"source": [0, 40], "canonical": [315, 360]},
+          {"source": [240, 250], "canonical": [0, 0]},
+          {"source": [40, 90], "canonical": [240, 300]},
+          {"source": [240, 290], "canonical": [-60, 0]}
+        ],
+        "rectangle": {
+          "source": [20, 70, 80, 120],
+          "canonicalCorners": [[270, 330], [270, 240], [195, 240], [195, 330]],
+          "canonicalBounds": [195, 240, 270, 330]
+        }
+      }
+    },
+    {
+      "id": "no-crop-no-rotation-unit-does-not-inherit",
+      "nodes": [
+        {"mediaBox": [0, 0, 612, 792], "userUnit": 9},
+        {},
+        {}
+      ],
+      "expected": {
+        "mediaBox": [0, 0, 612, 792], "cropBox": [0, 0, 612, 792],
+        "rotation": 0, "userUnit": 1, "pageSize": [612, 792],
+        "points": [
+          {"source": [0, 0], "canonical": [0, 792]},
+          {"source": [612, 792], "canonical": [612, 0]},
+          {"source": [123, 456], "canonical": [123, 336]}
+        ],
+        "rectangle": {
+          "source": [100, 100, 200, 140],
+          "canonicalCorners": [[100, 692], [200, 692], [200, 652], [100, 652]],
+          "canonicalBounds": [100, 652, 200, 692]
+        }
+      }
+    },
+    {
+      "id": "intermediate-inherited-r270",
+      "nodes": [
+        {"mediaBox": [10, 20, 410, 320]},
+        {"cropBox": [30, 50, 230, 250], "rotate": 270},
+        {}
+      ],
+      "expected": {
+        "mediaBox": [10, 20, 410, 320], "cropBox": [30, 50, 230, 250],
+        "rotation": 270, "userUnit": 1, "pageSize": [200, 200],
+        "points": [
+          {"source": [30, 50], "canonical": [200, 200]},
+          {"source": [230, 250], "canonical": [0, 0]},
+          {"source": [70, 80], "canonical": [170, 160]}
+        ],
+        "rectangle": {
+          "source": [70, 80, 130, 140],
+          "canonicalCorners": [[170, 160], [170, 100], [110, 100], [110, 160]],
+          "canonicalBounds": [110, 100, 170, 160]
+        }
+      }
+    },
+    {
+      "id": "fractional-360-r0",
+      "nodes": [
+        {"mediaBox": [-5.5, -9.25, 200.25, 150.75], "cropBox": [-2.5, -3.75, 90.125, 60.25], "rotate": 360},
+        {"userUnit": 1.25}
+      ],
+      "expected": {
+        "mediaBox": [-5.5, -9.25, 200.25, 150.75], "cropBox": [-2.5, -3.75, 90.125, 60.25],
+        "rotation": 0, "userUnit": 1.25, "pageSize": [115.78125, 80],
+        "points": [
+          {"source": [-2.5, -3.75], "canonical": [0, 80]},
+          {"source": [90.125, 60.25], "canonical": [115.78125, 0]},
+          {"source": [10.125, 12.25], "canonical": [15.78125, 60]}
+        ],
+        "rectangle": {
+          "source": [0, 0, 20, 10],
+          "canonicalCorners": [[3.125, 75.3125], [28.125, 75.3125], [28.125, 62.8125], [3.125, 62.8125]],
+          "canonicalBounds": [3.125, 62.8125, 28.125, 75.3125]
+        }
+      }
+    }
+  ],
+  "invalidCases": [
+    {"id": "missing-inherited-media", "nodes": [{}, {}]},
+    {"id": "zero-width-inherited-media", "nodes": [{"mediaBox": [0, 0, 0, 100]}, {}]},
+    {"id": "non-quarter-leaf-rotation", "nodes": [{"mediaBox": [0, 0, 100, 100]}, {"rotate": 45}]},
+    {"id": "fractional-leaf-rotation", "nodes": [{"mediaBox": [0, 0, 100, 100]}, {"rotate": 90.5}]},
+    {"id": "boolean-leaf-rotation", "nodes": [{"mediaBox": [0, 0, 100, 100]}, {"rotate": true}]},
+    {"id": "zero-leaf-userunit", "nodes": [{"mediaBox": [0, 0, 100, 100]}, {"userUnit": 0}]},
+    {"id": "null-leaf-userunit", "nodes": [{"mediaBox": [0, 0, 100, 100]}, {"userUnit": null}]},
+    {"id": "string-leaf-userunit", "nodes": [{"mediaBox": [0, 0, 100, 100]}, {"userUnit": "2"}]},
+    {"id": "crop-outside-media", "nodes": [{"mediaBox": [0, 0, 100, 100], "cropBox": [200, 200, 300, 300]}, {}]},
+    {"id": "inverted-inherited-crop", "nodes": [{"mediaBox": [0, 0, 100, 100]}, {"cropBox": [20, 20, 10, 50]}]},
+    {"id": "numeric-box-width-overflow", "nodes": [{"mediaBox": [-1e308, 0, 1e308, 10]}, {}]},
+    {"id": "userunit-page-size-overflow", "nodes": [{"mediaBox": [0, 0, 1000, 1000]}, {"userUnit": 1e308}]},
+    {"id": "userunit-determinant-underflow", "nodes": [{"mediaBox": [0, 0, 100, 100]}, {"userUnit": 1e-200}]},
+    {"id": "string-inherited-media-coordinate", "nodes": [{"mediaBox": [0, 0, "100", 100]}, {}]}
+  ]
+}
