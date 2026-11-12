@@ -15,7 +15,7 @@ internal object SelectionLassoGraphComponents {
         val walkCount: Int,
     )
     enum class InvalidReason {
-        OWNER_CLOSED, OWNER_MISMATCH, INVALID_ADMISSION, INVALID_GRAPH,
+        OWNER_CLOSED, OWNER_MISMATCH, UNAUTHENTICATED_ADMISSION, INVALID_ADMISSION, INVALID_GRAPH,
         INVALID_COMPONENT, INVALID_WALK,
     }
     sealed interface Result {
@@ -75,6 +75,7 @@ internal object SelectionLassoGraphComponents {
             } catch (_: IllegalStateException) { throw Invalid(InvalidReason.OWNER_CLOSED) }
             verify(admission.isOwnedBy(prepared) && cycles.isOwnedBy(prepared) &&
                 permutation.isOwnedBy(prepared) && adjacency.isOwnedBy(prepared), InvalidReason.OWNER_MISMATCH)
+            verify(admission.isAuthenticatedFor(prepared), InvalidReason.UNAUTHENTICATED_ADMISSION)
             val result = value(prepared.exact { construct(prepared, admission) })
             success = true
             return Result.Ready(result)

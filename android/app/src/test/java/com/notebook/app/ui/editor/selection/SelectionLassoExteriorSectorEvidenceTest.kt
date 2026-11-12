@@ -203,7 +203,15 @@ class SelectionLassoExteriorSectorEvidenceTest {
             val incidents=a.incidents.toMutableList()
             val edges=a.halfEdges.toMutableList()
             val links=c.permutation.links.toMutableList()
-            var membership=c.halfEdgeToWalk
+            val membership=c.halfEdgeToWalk.toMutableList()
+            val g=SelectionLassoCoincidentGeometry.Borrowed(f.owner,a.vertices,a.edgeGroups)
+            val badA=SelectionLassoIncidentAdjacency.Borrowed(f.owner,g,edges,incidents)
+            val badS=SelectionLassoSuccessorPermutation.Borrowed(f.owner,badA,links)
+            val badC=SelectionLassoSuccessorCycles.Borrowed(f.owner,badS,c.walks,membership)
+            // Genuine admission precedes corruption of these test-only mutable aliases.
+            val admitted=SelectionLassoEmbeddingAdmission.build(f.owner,badC)
+            assertTrue(admitted is SelectionLassoEmbeddingAdmission.Result.Ready)
+            val admission=(admitted as SelectionLassoEmbeddingAdmission.Result.Ready).value
             when(kind) {
                 0 -> incidents[0]=incidents[0].copy(vertexId=99)
                 1 -> incidents[0]=incidents[0].copy(outgoing=listOf(99))
@@ -211,18 +219,16 @@ class SelectionLassoExteriorSectorEvidenceTest {
                 3 -> incidents[0]=incidents[0].copy(outgoing=incidents[0].outgoing.reversed())
                 4 -> edges[0]=edges[0].copy(destination=edges[0].origin)
                 5 -> links[0]=links[0].copy(next=99)
-                6 -> membership=List(membership.size){99}
+                6 -> membership.indices.forEach { membership[it]=99 }
                 else -> links[0]=links[0].copy(previous=99)
             }
-            val g=SelectionLassoCoincidentGeometry.Borrowed(f.owner,a.vertices,a.edgeGroups)
-            val badA=SelectionLassoIncidentAdjacency.Borrowed(f.owner,g,edges,incidents)
-            val badS=SelectionLassoSuccessorPermutation.Borrowed(f.owner,badA,links)
-            val badC=SelectionLassoSuccessorCycles.Borrowed(f.owner,badS,c.walks,membership)
-            val admission=SelectionLassoEmbeddingAdmission.Borrowed(f.owner,badC,f.source.admission.record)
             val supplied=SelectionLassoGraphComponents.Borrowed(f.owner,admission,f.source.components,
                 f.source.vertexToComponent,f.source.edgeGroupToComponent,f.source.halfEdgeToComponent,
                 f.source.walkToComponent)
-            assertTrue(SelectionLassoExteriorSectorEvidence.build(f.owner,supplied) is Result.InvalidInput)
+            // Degree-two reversal preserves the cyclic link mapping but violates angular order.
+            val reason=if(kind==3) InvalidReason.INCIDENT else InvalidReason.COMPONENT
+            assertEquals("mutation $kind",Result.InvalidInput(reason),
+                SelectionLassoExteriorSectorEvidence.build(f.owner,supplied))
             assertEquals(0L,f.budget.used(SelectionQueryResource.TEMPORARY_BYTES))
             assertThrows(IllegalStateException::class.java){f.owner.segments}
         }

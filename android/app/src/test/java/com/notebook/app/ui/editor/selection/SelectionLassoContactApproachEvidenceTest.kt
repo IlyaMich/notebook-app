@@ -25,20 +25,14 @@ class SelectionLassoContactApproachEvidenceTest {
     }
     private fun finish(
         owner: Prepared, g: SelectionLassoCoincidentGeometry.Borrowed, b: SelectionQueryBudget,
-        forgedAdmission: Boolean = false,
+
     ): Fixture {
         val a = (SelectionLassoIncidentAdjacency.build(owner, g) as SelectionLassoIncidentAdjacency.Result.Ready).value
         val s = (SelectionLassoSuccessorPermutation.build(owner, a) as SelectionLassoSuccessorPermutation.Result.Ready).value
         val c = (SelectionLassoSuccessorCycles.build(owner, s) as SelectionLassoSuccessorCycles.Result.Ready).value
-        val e = if (forgedAdmission) {
-            val n = g.vertices.size.toLong(); val count = g.edges.size.toLong()
-            SelectionLassoEmbeddingAdmission.Borrowed(owner, c, SelectionLassoEmbeddingAdmission.Record(
-                n.toInt(), count.toInt(), count * (count - 1) / 2, count * (n - 2)))
-        } else {
-            val r = SelectionLassoEmbeddingAdmission.build(owner, c)
-            assertTrue("Fixture admission: $r", r is SelectionLassoEmbeddingAdmission.Result.Ready)
-            (r as SelectionLassoEmbeddingAdmission.Result.Ready).value
-        }
+        val r = SelectionLassoEmbeddingAdmission.build(owner, c)
+        assertTrue("Fixture admission: $r", r is SelectionLassoEmbeddingAdmission.Result.Ready)
+        val e = (r as SelectionLassoEmbeddingAdmission.Result.Ready).value
         val components = (SelectionLassoGraphComponents.build(owner, e) as SelectionLassoGraphComponents.Result.Ready).value
         val exterior = (SelectionLassoExteriorSectorEvidence.build(owner, components) as SelectionLassoExteriorSectorEvidence.Result.Ready).value
         val rays = Rays.build(owner, exterior)
@@ -47,7 +41,7 @@ class SelectionLassoContactApproachEvidenceTest {
     }
     private fun graph(
         points: List<DuPoint>, pairs: List<Pair<Int, Int>>,
-        b: SelectionQueryBudget = SelectionQueryBudget(), forgedAdmission: Boolean = false,
+        b: SelectionQueryBudget = SelectionQueryBudget(),
     ): Fixture {
         val owner = known(SelectionLassoSplitEvents.prepare(emptyList(), b))
         val g = known(owner.exact {
@@ -63,7 +57,7 @@ class SelectionLassoContactApproachEvidenceTest {
             }.sortedWith(compareBy<EdgeGroup> { it.startVertexId }.thenBy { it.endVertexId })
             SelectionLassoCoincidentGeometry.Borrowed(owner, vertices, groups)
         })
-        return finish(owner, g, b, forgedAdmission)
+        return finish(owner, g, b)
     }
     private fun production(input: List<DuPoint>, b: SelectionQueryBudget = SelectionQueryBudget()): Fixture {
         val owner = known(SelectionLassoSplitEvents.prepare(input, b))
@@ -443,16 +437,34 @@ class SelectionLassoContactApproachEvidenceTest {
         }
     }
     @Test fun contradictoryAuthenticatedTiesFromForgedUpstreamAdmissionFailClosed() {
-        // Real 3A scan, deliberately false upstream embedding. The private completion seal
-        // certifies that scan, not the forged admission: local cross-component ties reject.
-        graph(listOf(p(-1, 0), p(0, 0), p(0, -1), p(0, 1), p(4, 0), p(4, 1)),
-            listOf(0 to 1, 2 to 3, 4 to 5), forgedAdmission = true).use { f ->
-            assertTrue(f.rays.isAuthenticatedFor(f.owner))
-            val r = Approach.build(f.owner, f.rays)
-            assertTrue(r is Approach.Result.InvalidInput)
-            assertTrue((r as Approach.Result.InvalidInput).reason in
-                listOf(Approach.InvalidReason.CONTACT, Approach.InvalidReason.TIES))
-            assertEquals(0L, f.budget.used(SelectionQueryResource.TEMPORARY_BYTES))
+        // The old tied-contact fixture contains an unsplit T-junction. Genuine admission
+        // must reject it before authenticated rays or approach evidence can be constructed.
+        val b = SelectionQueryBudget()
+        val owner = known(SelectionLassoSplitEvents.prepare(emptyList(), b))
+        owner.use {
+            val g = known(owner.exact {
+                val original = listOf(p(-1, 0), p(0, 0), p(0, -1), p(0, 1), p(4, 0), p(4, 1)).map { point(it) }
+                val sorted = original.sortedWith { a, c -> when(compare(a,c)) {
+                    Sign.NEGATIVE -> -1; Sign.ZERO -> 0; Sign.POSITIVE -> 1
+                } }
+                val vertices = sorted.mapIndexed { i, q -> Vertex(i, q) }
+                val groups = listOf(0 to 1, 2 to 3, 4 to 5).map { (a, c) ->
+                    val ai = sorted.indexOfFirst { compare(it, original[a]) == Sign.ZERO }
+                    val ci = sorted.indexOfFirst { compare(it, original[c]) == Sign.ZERO }
+                    val lo = minOf(ai, ci); val hi = maxOf(ai, ci)
+                    EdgeGroup(lo, hi, sorted[lo], sorted[hi], emptyList())
+                }.sortedWith(compareBy<EdgeGroup> { it.startVertexId }.thenBy { it.endVertexId })
+                SelectionLassoCoincidentGeometry.Borrowed(owner, vertices, groups)
+            })
+            val a = (SelectionLassoIncidentAdjacency.build(owner, g) as SelectionLassoIncidentAdjacency.Result.Ready).value
+            val s = (SelectionLassoSuccessorPermutation.build(owner, a) as SelectionLassoSuccessorPermutation.Result.Ready).value
+            val c = (SelectionLassoSuccessorCycles.build(owner, s) as SelectionLassoSuccessorCycles.Result.Ready).value
+            val result = SelectionLassoEmbeddingAdmission.build(owner, c)
+            assertTrue(result is SelectionLassoEmbeddingAdmission.Result.InvalidInput)
+            assertEquals(SelectionLassoEmbeddingAdmission.InvalidReason.UNSPLIT_ENDPOINT_CONTACT,
+                (result as SelectionLassoEmbeddingAdmission.Result.InvalidInput).reason)
+            assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertThrows(IllegalStateException::class.java) { owner.segments }
         }
     }
     @Test fun malformedUpstreamGraphAfterScanCannotBypassDownstreamValidation() {
@@ -470,7 +482,9 @@ class SelectionLassoContactApproachEvidenceTest {
                 val adjacency = SelectionLassoIncidentAdjacency.Borrowed(f.owner, g, edges, a.incidents)
                 val s = SelectionLassoSuccessorPermutation.Borrowed(f.owner, adjacency, links)
                 val c = SelectionLassoSuccessorCycles.Borrowed(f.owner, s, f.cycles.walks, membership)
-                val admission = SelectionLassoEmbeddingAdmission.Borrowed(f.owner, c, f.components.admission.record)
+                val admitted = SelectionLassoEmbeddingAdmission.build(f.owner, c)
+                assertTrue(admitted is SelectionLassoEmbeddingAdmission.Result.Ready)
+                val admission = (admitted as SelectionLassoEmbeddingAdmission.Result.Ready).value
                 val components = (SelectionLassoGraphComponents.build(f.owner, admission) as SelectionLassoGraphComponents.Result.Ready).value
                 val exterior = (SelectionLassoExteriorSectorEvidence.build(f.owner, components) as SelectionLassoExteriorSectorEvidence.Result.Ready).value
                 val scan = (Rays.build(f.owner, exterior) as Rays.Result.Ready).value

@@ -72,6 +72,7 @@ class SelectionLassoGraphComponentsTest {
     private fun mixed(b: SelectionQueryBudget = SelectionQueryBudget()) =
         graph(listOf(p(0, 0), p(0, 1), p(1, 0), p(2, 1), p(3, 0)), listOf(0 to 2, 1 to 3), b)
     private fun build(f: Fixture): SelectionLassoGraphComponents.Borrowed {
+        assertTrue(f.admission.isAuthenticatedFor(f.owner))
         val r = SelectionLassoGraphComponents.build(f.owner, f.admission)
         assertTrue("Expected Ready: $r", r is Result.Ready)
         return (r as Result.Ready).value
@@ -116,11 +117,26 @@ class SelectionLassoGraphComponentsTest {
         walks: List<SelectionLassoSuccessorCycles.Walk> = f.cycles.walks,
         membership: List<Int> = f.cycles.halfEdgeToWalk,
     ): SelectionLassoEmbeddingAdmission.Borrowed {
-        val g = SelectionLassoCoincidentGeometry.Borrowed(f.owner, vertices, groups)
-        val a = SelectionLassoIncidentAdjacency.Borrowed(f.owner, g, edges, incidents)
-        val s = SelectionLassoSuccessorPermutation.Borrowed(f.owner, a, links)
-        val c = SelectionLassoSuccessorCycles.Borrowed(f.owner, s, walks, membership)
-        return forged(f, c)
+        // Admit an initially valid test-only mutable graph, then corrupt only its aliases.
+        // This preserves deep component validation without manufacturing completion.
+        val original = f.cycles; val source = original.adjacency
+        val vv = source.vertices.toMutableList(); val gg = source.edgeGroups.toMutableList()
+        val hh = source.halfEdges.toMutableList(); val ii = source.incidents.toMutableList()
+        val ll = original.permutation.links.toMutableList()
+        val ww = original.walks.toMutableList(); val mm = original.halfEdgeToWalk.toMutableList()
+        val g = SelectionLassoCoincidentGeometry.Borrowed(f.owner, vv, gg)
+        val a = SelectionLassoIncidentAdjacency.Borrowed(f.owner, g, hh, ii)
+        val s = SelectionLassoSuccessorPermutation.Borrowed(f.owner, a, ll)
+        val c = SelectionLassoSuccessorCycles.Borrowed(f.owner, s, ww, mm)
+        val result = SelectionLassoEmbeddingAdmission.build(f.owner, c)
+        assertTrue(result is SelectionLassoEmbeddingAdmission.Result.Ready)
+        val admitted = (result as SelectionLassoEmbeddingAdmission.Result.Ready).value
+        assertTrue(admitted.isAuthenticatedFor(f.owner))
+        vv.clear(); vv.addAll(vertices); gg.clear(); gg.addAll(groups)
+        hh.clear(); hh.addAll(edges); ii.clear(); ii.addAll(incidents)
+        ll.clear(); ll.addAll(links); ww.clear(); ww.addAll(walks)
+        mm.clear(); mm.addAll(membership)
+        return admitted
     }
     private fun reject(
         f: Fixture, reason: InvalidReason, source: SelectionLassoEmbeddingAdmission.Borrowed = f.admission,
@@ -136,6 +152,60 @@ class SelectionLassoGraphComponentsTest {
         val cause = (r as Result.Unresolved).cause
         assertTrue(cause is SelectionPredicateResult.WorkloadExceeded)
         return (cause as SelectionPredicateResult.WorkloadExceeded).failure
+    }
+
+
+    @Test fun unauthenticatedCopiesCountsAndSubclassesRejectBeforeAnyArithmetic() {
+        for (empty in listOf(false, true)) for (kind in 0..3) {
+            var armed = false; var callbacks = 0
+            val b = SelectionQueryBudget(cancellationCheckpoint = {
+                callbacks++; if (armed) throw CancellationException("No arithmetic allowed")
+            })
+            production(if (empty) emptyList() else triangle, b).use { f ->
+                val r = f.admission.record
+                val supplied = when (kind) {
+                    0 -> forged(f)
+                    1 -> forged(f, record = r.copy())
+                    2 -> object : SelectionLassoEmbeddingAdmission.Borrowed(f.owner, f.cycles, r) {}
+                    else -> forged(f, record = r.copy(vertexCount = 99, examinedEdgePairs = -1))
+                }
+                assertFalse(supplied.isAuthenticatedFor(f.owner))
+                val counters = SelectionQueryResource.entries.associateWith { b.used(it) }
+                val failure = b.failure; val before = callbacks
+                armed = true
+                reject(f, InvalidReason.UNAUTHENTICATED_ADMISSION, supplied)
+                assertEquals(before, callbacks) // also rules out scan-kernel entry
+                for (resource in SelectionQueryResource.entries) {
+                    assertEquals(if (resource == SelectionQueryResource.TEMPORARY_BYTES) 0L
+                        else counters.getValue(resource), b.used(resource))
+                }
+                assertSame(failure, b.failure)
+                assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            }
+        }
+    }
+
+    @Test fun closedOwnerPrecedesUnauthenticatedAdmission() {
+        mixed().use { f ->
+            val fake = forged(f)
+            f.owner.close()
+            assertEquals(Result.InvalidInput(InvalidReason.OWNER_CLOSED),
+                SelectionLassoGraphComponents.build(f.owner, fake))
+        }
+    }
+
+    @Test fun genuinelyAdmittedConcaveAndExtremeSyntheticGeometryRemainSupported() {
+        production(listOf(p(0, 0), p(4, 0), p(2, 1), p(4, 4), p(0, 4))).use {
+            check(it, build(it))
+        }
+        for (s in listOf(Math.scalb(1.0, -400), Math.scalb(1.0, 400))) {
+            graph(listOf(p(0, 0), p(s, 0), p(0, s), p(3 * s, 0)),
+                listOf(0 to 1, 1 to 2, 2 to 0)).use {
+                val result = build(it); check(it, result)
+                assertEquals(2, result.componentCount)
+                assertEquals(0L, it.budget.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            }
+        }
     }
 
     @Test fun emptyGraphHasNoComponents() {
@@ -327,7 +397,7 @@ class SelectionLassoGraphComponentsTest {
                 2 -> r.copy(examinedEdgePairs = -1)
                 else -> r.copy(examinedNonincidentVertexEdgeRelations = -1)
             }
-            reject(f, InvalidReason.INVALID_ADMISSION, forged(f, record = altered))
+            reject(f, InvalidReason.UNAUTHENTICATED_ADMISSION, forged(f, record = altered))
         }
     }
     @Test fun invalidVertexAndEndpointIdsRejectBeforeIndexedAccess() {
