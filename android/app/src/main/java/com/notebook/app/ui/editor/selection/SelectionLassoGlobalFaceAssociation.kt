@@ -38,7 +38,7 @@ internal object SelectionLassoGlobalFaceAssociation {
         data class InvalidInput(val reason: InvalidReason) : Result
         data class Unresolved(val cause: SelectionPredicateResult<Nothing>) : Result
     }
-    class Borrowed internal constructor(
+    open class Borrowed internal constructor(
         private val owner: Prepared, private val source: Approach.Borrowed,
         private val counters: Counts, private val mapping: List<Int>, private val inventory: List<Face>,
     ) {
@@ -48,7 +48,16 @@ internal object SelectionLassoGlobalFaceAssociation {
         val faces: List<Face> get() { owner.segments; return inventory }
         val faceCount: Int get() { owner.segments; return inventory.size }
         val unboundedFaceId: Int get() { owner.segments; return 0 }
+        internal fun isOwnedBy(prepared: Prepared): Boolean = owner === prepared
+        /** Historical completion only; normal getters independently enforce owner liveness. */
+        internal fun isAuthenticatedFor(prepared: Prepared): Boolean = owner === prepared && this is Completed
     }
+    /** Only successful private publication can mint completion. Face records are immutable;
+     * upstream test aliases are not frozen by this certificate. Consumers must still validate
+     * relevant sources/associations; no source-occurrence coverage or parity is certified.
+     */
+    private class Completed(owner: Prepared, source: Approach.Borrowed, counters: Counts,
+        mapping: List<Int>, inventory: List<Face>) : Borrowed(owner, source, counters, mapping, inventory)
     private class Invalid(val reason: InvalidReason) : RuntimeException()
     private class Unresolved(val outcome: SelectionPredicateResult<Nothing>) : RuntimeException()
     private fun verify(ok: Boolean, reason: InvalidReason) { if (!ok) throw Invalid(reason) }
@@ -346,7 +355,8 @@ internal object SelectionLassoGlobalFaceAssociation {
         chargeIncidentLassoWork(plus(mapping.size.toLong(), 1))
         val index = ArrayList<Int>(mapping.size)
         for (id in mapping) { chargeIncidentLassoWork(); index.add(id) }
+        val immutableIndex = Collections.unmodifiableList(index)
         chargeIncidentLassoWork() // final cancellation checkpoint before atomic publication
-        return Borrowed(owner, source, counts, Collections.unmodifiableList(index), faces)
+        return Completed(owner, source, counts, immutableIndex, faces)
     }
 }

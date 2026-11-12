@@ -103,6 +103,8 @@ class SelectionLassoGlobalFaceAssociationTest {
         val r = Global.build(f.owner, f.approach)
         assertTrue("Expected Ready: $r", r is Global.Result.Ready)
         val value = (r as Global.Result.Ready).value
+        assertTrue(value.isOwnedBy(f.owner))
+        assertTrue(value.isAuthenticatedFor(f.owner))
         assertEquals(faces + value.faceCount, f.budget.used(SelectionQueryResource.ARRANGEMENT_FACES))
         assertEquals(edges, f.budget.used(SelectionQueryResource.ARRANGEMENT_EDGES))
         assertEquals(events, f.budget.used(SelectionQueryResource.ARRANGEMENT_EVENTS))
@@ -157,6 +159,110 @@ class SelectionLassoGlobalFaceAssociationTest {
     }
     private fun limits(resource: SelectionQueryResource, limit: Long) = SelectionQueryLimits(
         query=SelectionQueryResource.entries.associateWith { if(it==resource)limit else it.queryCeiling })
+
+
+    @Test fun syntheticCopiesPlausibleCountsAndSubclassesCannotTransferCompletion() {
+        nested().use { f ->
+            val genuine=ready(f)
+            val copies=listOf(
+                Global.Borrowed(f.owner,genuine.approach,genuine.counts,genuine.walkToFace,genuine.faces),
+                Global.Borrowed(f.owner,genuine.approach,genuine.counts.copy(),genuine.walkToFace,genuine.faces),
+                Global.Borrowed(f.owner,genuine.approach,genuine.counts,genuine.walkToFace.toList(),genuine.faces),
+                Global.Borrowed(f.owner,genuine.approach,genuine.counts,genuine.walkToFace,
+                    genuine.faces.map { it.copy(boundaryWalkIds=it.boundaryWalkIds.toList()) }),
+                Global.Borrowed(f.owner,genuine.approach,genuine.counts,genuine.walkToFace,
+                    genuine.faces.map { it.copy(id=it.id+99) }),
+                Global.Borrowed(f.owner,genuine.approach,genuine.counts,genuine.walkToFace,
+                    genuine.faces.map { it.copy(isUnbounded=!it.isUnbounded) }),
+                // Wrong nested face association with a plausible, unchanged Euler face count.
+                Global.Borrowed(f.owner,genuine.approach,genuine.counts.copy(),listOf(0,1,0,2),
+                    listOf(Global.Face(0,listOf(0,2),true),Global.Face(1,listOf(1),false),
+                        Global.Face(2,listOf(3),false))),
+                object : Global.Borrowed(f.owner,genuine.approach,genuine.counts,
+                    genuine.walkToFace,genuine.faces) {},
+            )
+            for(copy in copies) {
+                assertTrue(copy.isOwnedBy(f.owner))
+                assertFalse(copy.isAuthenticatedFor(f.owner))
+            }
+            check(f,genuine,3,listOf(0,1,1,2))
+            assertTrue(genuine.isAuthenticatedFor(f.owner))
+        }
+    }
+
+    @Test fun identityAndAuthenticationArePureForArmedOwnersAndSeparateFromLiveness() {
+        var armed=false; var primaryCalls=0; var foreignCalls=0
+        val b=SelectionQueryBudget(cancellationCheckpoint={primaryCalls++;if(armed)throw CancellationException()})
+        val foreignBudget=SelectionQueryBudget(cancellationCheckpoint={foreignCalls++;if(armed)throw CancellationException()})
+        nested(b).use { f -> production(emptyList(),foreignBudget).use { foreign ->
+            val genuine=ready(f); val other=ready(foreign)
+            val primaryCounters=SelectionQueryResource.entries.map { b.used(it) }
+            val foreignCounters=SelectionQueryResource.entries.map { foreignBudget.used(it) }
+            val primaryFailure=b.failure; val foreignFailure=foreignBudget.failure
+            val beforePrimary=primaryCalls; val beforeForeign=foreignCalls
+            armed=true
+            repeat(3) {
+                assertTrue(genuine.isOwnedBy(f.owner)); assertFalse(genuine.isOwnedBy(foreign.owner))
+                assertTrue(genuine.isAuthenticatedFor(f.owner)); assertFalse(genuine.isAuthenticatedFor(foreign.owner))
+                assertTrue(other.isOwnedBy(foreign.owner)); assertFalse(other.isOwnedBy(f.owner))
+                assertTrue(other.isAuthenticatedFor(foreign.owner)); assertFalse(other.isAuthenticatedFor(f.owner))
+            }
+            assertEquals(beforePrimary,primaryCalls); assertEquals(beforeForeign,foreignCalls)
+            assertEquals(primaryCounters,SelectionQueryResource.entries.map { b.used(it) })
+            assertEquals(foreignCounters,SelectionQueryResource.entries.map { foreignBudget.used(it) })
+            assertSame(primaryFailure,b.failure); assertSame(foreignFailure,foreignBudget.failure)
+            f.owner.close()
+            val closedCounters=SelectionQueryResource.entries.map { b.used(it) }
+            assertTrue(genuine.isOwnedBy(f.owner)); assertTrue(genuine.isAuthenticatedFor(f.owner))
+            assertFalse(genuine.isOwnedBy(foreign.owner)); assertFalse(genuine.isAuthenticatedFor(foreign.owner))
+            assertEquals(beforePrimary,primaryCalls); assertEquals(beforeForeign,foreignCalls)
+            assertEquals(closedCounters,SelectionQueryResource.entries.map { b.used(it) })
+            assertEquals(foreignCounters,SelectionQueryResource.entries.map { foreignBudget.used(it) })
+            for(getter in listOf<()->Any>({genuine.approach},{genuine.counts},{genuine.walkToFace},
+                {genuine.faces},{genuine.faceCount},{genuine.unboundedFaceId}))
+                assertThrows(IllegalStateException::class.java){getter()}
+            assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            armed=false
+            assertEquals(7,known(foreign.owner.exact { 7 }))
+            assertTrue(other.isAuthenticatedFor(foreign.owner))
+        } }
+    }
+
+    @Test fun historicalCompletionDoesNotReplaceValidationAfterSourceAliasMutation() {
+        nested(mutable=true).use { f ->
+            val genuine=ready(f)
+            f.aliases!!.groups[0]=f.aliases.groups[0].copy(endVertexId=99)
+            assertTrue(genuine.isAuthenticatedFor(f.owner))
+            // A completed historical result cannot authorize a new build over changed sources.
+            reject(f,f.approach,Global.InvalidReason.SOURCE_ASSOCIATION)
+            assertTrue(genuine.isOwnedBy(f.owner)); assertTrue(genuine.isAuthenticatedFor(f.owner))
+            assertThrows(IllegalStateException::class.java){genuine.faces}
+        }
+    }
+
+    @Test fun finalPublicationWorkExhaustionCannotMintCompletedBorrower() {
+        var armed=false; var injected=false; var publicationCalls=0; var finalCall=0
+        lateinit var b: SelectionQueryBudget
+        b=SelectionQueryBudget(cancellationCheckpoint={
+            if(armed && !injected && phase("publish") && ++publicationCalls==finalCall) {
+                injected=true
+                b.charge(SelectionQueryResource.WORK_UNITS,b.limits.query.getValue(SelectionQueryResource.WORK_UNITS)-
+                    b.used(SelectionQueryResource.WORK_UNITS))
+            }
+        })
+        nested(b).use { f ->
+            finalCall=f.cycles.walks.size+2
+            armed=true
+            val result=Global.build(f.owner,f.approach)
+            assertEquals(SelectionQueryResource.WORK_UNITS,failure(result).resource)
+            assertTrue(injected)
+            assertEquals(3L,b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            assertEquals(b.limits.query.getValue(SelectionQueryResource.WORK_UNITS),
+                b.used(SelectionQueryResource.WORK_UNITS))
+            assertEquals(0L,b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertThrows(IllegalStateException::class.java){f.owner.segments}
+        }
+    }
 
     @Test fun emptyAndIsolatedVerticesHaveOneUnboundedFaceAndNoBoundaryWalk() {
         production(emptyList()).use { check(it,ready(it),1,emptyList()) }
