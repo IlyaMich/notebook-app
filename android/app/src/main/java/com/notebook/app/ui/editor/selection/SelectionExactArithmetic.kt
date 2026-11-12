@@ -275,6 +275,17 @@ internal class SelectionExactArithmetic(private val budget: SelectionQueryBudget
         retainRecord(160) // half-edge, cached ray and incident/output slots
     }
 
+    /** Admit one attempted global face record, including the eventual unbounded face.
+     * The 160-byte allowance covers its fixed record and output-container slots, not boundary
+     * member lists or measured JVM heap. Candidate walks are not charged as global faces.
+     */
+    internal fun chargeGlobalLassoFaceRecord() {
+        active()
+        consume(budget.charge(SelectionQueryResource.ARRANGEMENT_FACES))
+        chargeIncidentLassoWork()
+        retainRecord(160)
+    }
+
     internal fun retainRecord(bytes: Long) { active(); reserve(bytes) }
     private fun signOf(n: Int) = when {
         n < 0 -> SelectionRobustPredicates.Sign.NEGATIVE

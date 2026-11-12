@@ -42,15 +42,23 @@ internal object SelectionLassoContactApproachEvidence {
         data class InvalidInput(val reason: InvalidReason) : Result
         data class Unresolved(val cause: SelectionPredicateResult<Nothing>) : Result
     }
-    class Borrowed internal constructor(
+    open class Borrowed internal constructor(
         private val owner: Prepared, private val source: Rays.Borrowed, private val inventory: List<Evidence>,
     ) {
         val contacts: Rays.Borrowed get() { owner.segments; return source }
         val components: SelectionLassoGraphComponents.Borrowed get() { owner.segments; return source.components }
         val records: List<Evidence> get() { owner.segments; return inventory }
         internal fun isOwnedBy(prepared: Prepared) = owner === prepared
+        /** Pure completion provenance; owner liveness remains the getter contract. Final. */
+        internal fun isAuthenticatedFor(prepared: Prepared): Boolean = owner === prepared && this is Completed
         fun <T> exact(action: SelectionExactArithmetic.() -> T) = owner.exact(action)
     }
+    /** Only private successful publication can construct this final subtype. This authenticates
+     * completed approach construction, not independently constructible upstream admissions.
+     */
+    private class Completed(owner: Prepared, source: Rays.Borrowed, inventory: List<Evidence>) :
+        Borrowed(owner, source, inventory)
+
     private class Invalid(val reason: InvalidReason) : RuntimeException()
     private class Unresolved(val outcome: SelectionPredicateResult<Nothing>) : RuntimeException()
     private fun verify(ok: Boolean, reason: InvalidReason) { if (!ok) throw Invalid(reason) }
@@ -342,6 +350,6 @@ internal object SelectionLassoContactApproachEvidence {
         owner: Prepared, source: Rays.Borrowed, output: ArrayList<Evidence>,
     ): Borrowed {
         chargeIncidentLassoWork(output.size.toLong() + 1)
-        return Borrowed(owner, source, Collections.unmodifiableList(output))
+        return Completed(owner, source, Collections.unmodifiableList(output))
     }
 }

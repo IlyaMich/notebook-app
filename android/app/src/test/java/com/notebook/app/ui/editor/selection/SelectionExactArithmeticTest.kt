@@ -8,6 +8,155 @@ import org.junit.Test
 
 class SelectionExactArithmeticTest {
     private fun <T> known(r: SelectionPredicateResult<T>) = (r as SelectionPredicateResult.Known<T>).value
+
+    @Test fun globalFaceAdmissionRequiresActiveAttemptAndUsesOnlyOriginalCounters() {
+        val b = SelectionQueryBudget()
+        val a = SelectionExactArithmetic(b)
+        try {
+            assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            assertThrows(IllegalStateException::class.java) { a.chargeGlobalLassoFaceRecord() }
+            assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            known(a.attempt { chargeGlobalLassoFaceRecord() })
+            assertEquals(1L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            assertEquals(1L, b.used(SelectionQueryResource.WORK_UNITS))
+            assertEquals(160L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+            assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_EVENTS))
+            known(a.attempt { chargeGlobalLassoFaceRecord() })
+            assertEquals(2L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            assertEquals(2L, b.used(SelectionQueryResource.WORK_UNITS))
+            assertEquals(320L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            a.close()
+            assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertThrows(IllegalStateException::class.java) { a.chargeGlobalLassoFaceRecord() }
+            assertThrows(IllegalStateException::class.java) { a.attempt { chargeGlobalLassoFaceRecord() } }
+            assertEquals(2L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            assertEquals(2L, b.used(SelectionQueryResource.WORK_UNITS))
+        } finally { a.close() }
+    }
+
+    @Test fun globalFaceDefaultQuotaAccepts8192AndRejectsNextWithoutReset() {
+        val b = SelectionQueryBudget()
+        val a = SelectionExactArithmetic(b)
+        try {
+            assertEquals(8192L, b.limits.query.getValue(SelectionQueryResource.ARRANGEMENT_FACES))
+            known(a.attempt { repeat(8191) { chargeGlobalLassoFaceRecord() } })
+            assertEquals(8191L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            known(a.attempt { chargeGlobalLassoFaceRecord() })
+            assertEquals(8192L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            assertEquals(8192L, b.used(SelectionQueryResource.WORK_UNITS))
+            assertEquals(1310720L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            val result = a.attempt { chargeGlobalLassoFaceRecord() }
+            assertTrue(result is SelectionPredicateResult.WorkloadExceeded)
+            val rejected = (result as SelectionPredicateResult.WorkloadExceeded).failure
+            assertEquals(SelectionQueryResource.ARRANGEMENT_FACES, rejected.resource)
+            assertEquals(SelectionBudgetScope.QUERY, rejected.scope)
+            assertEquals(SelectionBudgetConstraint.QUOTA, rejected.constraint)
+            assertEquals(8192L, rejected.used)
+            assertEquals(1L, rejected.requested)
+            assertEquals(8192L, rejected.limit)
+            assertSame(rejected, b.failure)
+            assertEquals(8192L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            assertEquals(8192L, b.used(SelectionQueryResource.WORK_UNITS))
+            assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+            assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_EVENTS))
+            assertThrows(IllegalStateException::class.java) { a.attempt { chargeGlobalLassoFaceRecord() } }
+            // A fresh test context on the same budget cannot erase sticky failure/history.
+            SelectionExactArithmetic(b).use { retry ->
+                val again = retry.attempt { chargeGlobalLassoFaceRecord() }
+                assertTrue(again is SelectionPredicateResult.WorkloadExceeded)
+                assertSame(rejected, (again as SelectionPredicateResult.WorkloadExceeded).failure)
+            }
+            assertEquals(8192L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            assertEquals(8192L, b.used(SelectionQueryResource.WORK_UNITS))
+            assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        } finally { a.close() }
+    }
+
+    @Test fun globalFaceDenialAtEachAdmissionStageIsTypedAndClosesArena() {
+        for ((resource, maximum) in listOf(
+            SelectionQueryResource.ARRANGEMENT_FACES to 0L,
+            SelectionQueryResource.WORK_UNITS to 0L,
+            SelectionQueryResource.TEMPORARY_BYTES to 159L,
+        )) {
+            val limits = SelectionQueryResource.entries.associateWith {
+                if (it == resource) maximum else it.queryCeiling
+            }
+            val b = SelectionQueryBudget(SelectionQueryLimits(query = limits))
+            val a = SelectionExactArithmetic(b)
+            try {
+                val result = a.attempt { chargeGlobalLassoFaceRecord() }
+                assertTrue(result is SelectionPredicateResult.WorkloadExceeded)
+                val rejected = (result as SelectionPredicateResult.WorkloadExceeded).failure
+                assertEquals(resource, rejected.resource)
+                assertSame(rejected, b.failure)
+                assertEquals(if (resource == SelectionQueryResource.ARRANGEMENT_FACES) 0L else 1L,
+                    b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+                assertEquals(if (resource == SelectionQueryResource.TEMPORARY_BYTES) 1L else 0L,
+                    b.used(SelectionQueryResource.WORK_UNITS))
+                assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+                assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+                assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_EVENTS))
+                assertThrows(IllegalStateException::class.java) { a.attempt { chargeGlobalLassoFaceRecord() } }
+            } finally { a.close() }
+        }
+    }
+
+    @Test fun globalFaceExactRepresentationBoundaryAdmitsBeforeReservation() {
+        val limits = SelectionQueryResource.entries.associateWith {
+            if (it == SelectionQueryResource.TEMPORARY_BYTES) 160L else it.queryCeiling
+        }
+        val b = SelectionQueryBudget(SelectionQueryLimits(query = limits))
+        SelectionExactArithmetic(b).use { a ->
+            known(a.attempt { chargeGlobalLassoFaceRecord() })
+            assertEquals(160L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertNull(b.failure)
+        }
+        assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+        assertEquals(1L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+        assertEquals(1L, b.used(SelectionQueryResource.WORK_UNITS))
+    }
+
+    @Test fun globalFaceCancellationBetweenChargesReleasesPriorReservations() {
+        for (afterWork in listOf(false, true)) {
+            lateinit var b: SelectionQueryBudget
+            b = SelectionQueryBudget(cancellationCheckpoint = {
+                if (b.used(SelectionQueryResource.ARRANGEMENT_FACES) == 1L &&
+                    (!afterWork || b.used(SelectionQueryResource.WORK_UNITS) == 1L))
+                    throw CancellationException()
+            })
+            val a = SelectionExactArithmetic(b)
+            try {
+                known(a.attempt { retainRecord(32) })
+                assertThrows(CancellationException::class.java) {
+                    a.attempt { chargeGlobalLassoFaceRecord() }
+                }
+                assertEquals(1L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+                assertEquals(if (afterWork) 1L else 0L, b.used(SelectionQueryResource.WORK_UNITS))
+                assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+                assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_EVENTS))
+                assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_EDGES))
+                assertNull(b.failure)
+                assertThrows(IllegalStateException::class.java) { a.attempt { chargeGlobalLassoFaceRecord() } }
+            } finally { a.close() }
+        }
+    }
+
+    @Test fun inactiveGlobalFaceAdmissionDoesNotInvokeCancellationOrChargeBudget() {
+        var callbacks = 0
+        val b = SelectionQueryBudget(cancellationCheckpoint = { callbacks++; throw CancellationException() })
+        val a = SelectionExactArithmetic(b)
+        try {
+            assertThrows(IllegalStateException::class.java) { a.chargeGlobalLassoFaceRecord() }
+            a.close()
+            assertThrows(IllegalStateException::class.java) { a.chargeGlobalLassoFaceRecord() }
+            assertEquals(0, callbacks)
+            assertTrue(SelectionQueryResource.entries.all { b.used(it) == 0L })
+            assertNull(b.failure)
+        } finally { a.close() }
+    }
+
     @Test fun conversionPreservesBinaryValueRatherThanDecimalSpelling() {
         SelectionExactArithmetic(SelectionQueryBudget()).use { a ->
             val value = known(a.attempt { fromDouble(0.1) })

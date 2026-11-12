@@ -118,6 +118,126 @@ class SelectionLassoContactApproachEvidenceTest {
         return (cause as SelectionPredicateResult.WorkloadExceeded).failure
     }
 
+
+    @Test fun completedVariantsAuthenticateWithoutChangingTheirSourceRecords() {
+        val variants = mutableSetOf<String>()
+        val fixtures = listOf(production(emptyList()),
+            graph(listOf(p(0, 0)), emptyList()), square(), tip(),
+            graph(listOf(p(0, 0), p(2, 0), p(4, 0), p(4, 1)), listOf(0 to 1, 2 to 3)))
+        try {
+            for (f in fixtures) {
+                val result = build(f)
+                assertTrue(result.isAuthenticatedFor(f.owner))
+                check(f, result)
+                result.records.forEach { variants.add(it.javaClass.simpleName) }
+            }
+            assertEquals(setOf("IsolatedSource", "NoForeignContact", "EdgeInteriorApproach",
+                "VertexSectorApproach", "OverlapStartApproach"), variants)
+        } finally { fixtures.forEach { it.close() } }
+    }
+
+    @Test fun authenticationIsPureOwnerBoundAndIndependentOfLiveness() {
+        var armed = false; var callbacks = 0
+        val b = SelectionQueryBudget(cancellationCheckpoint = {
+            callbacks++; if (armed) throw CancellationException()
+        })
+        tip(b).use { f ->
+            val result = build(f)
+            val foreign = known(SelectionLassoSplitEvents.prepare(emptyList(), SelectionQueryBudget()))
+            try {
+                val counters = SelectionQueryResource.entries.map { b.used(it) }
+                val failure = b.failure; val before = callbacks
+                armed = true
+                repeat(3) {
+                    assertTrue(result.isAuthenticatedFor(f.owner))
+                    assertFalse(result.isAuthenticatedFor(foreign))
+                }
+                assertEquals(before, callbacks)
+                assertEquals(counters, SelectionQueryResource.entries.map { b.used(it) })
+                assertSame(failure, b.failure)
+                assertEquals(7, known(foreign.exact { 7 }))
+                f.owner.close()
+                val closedCounters = SelectionQueryResource.entries.map { b.used(it) }
+                assertTrue(result.isAuthenticatedFor(f.owner))
+                assertFalse(result.isAuthenticatedFor(foreign))
+                assertEquals(before, callbacks)
+                assertEquals(closedCounters, SelectionQueryResource.entries.map { b.used(it) })
+                assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+                assertThrows(IllegalStateException::class.java) { result.records }
+                assertThrows(IllegalStateException::class.java) { result.contacts }
+                assertThrows(IllegalStateException::class.java) { result.components }
+            } finally { foreign.close() }
+        }
+    }
+
+    @Test fun constructorsSubclassesAndCopiedRecordsCannotTransferAuthentication() {
+        tip().use { f ->
+            val genuine = build(f)
+            val copy = Approach.Borrowed(f.owner, genuine.contacts, genuine.records)
+            val subclass = object : Approach.Borrowed(f.owner, genuine.contacts, genuine.records) {}
+            assertFalse(copy.isAuthenticatedFor(f.owner))
+            assertFalse(subclass.isAuthenticatedFor(f.owner))
+            val replacement = genuine.records.toMutableList()
+            val mutableCopy = Approach.Borrowed(f.owner, genuine.contacts, replacement)
+            replacement.clear()
+            assertFalse(mutableCopy.isAuthenticatedFor(f.owner))
+            assertTrue(genuine.isAuthenticatedFor(f.owner))
+            assertEquals(2, genuine.records.size)
+            assertThrows(UnsupportedOperationException::class.java) { (genuine.records as MutableList).clear() }
+        }
+    }
+
+    @Test fun fabricatedNoContactAndTargetWalkCannotClaimApproachCompletion() {
+        tip().use { f ->
+            val genuine = build(f)
+            val first = (genuine.records[1] as Approach.VertexSectorApproach).original
+            val falseNoContact = Rays.NoOtherComponentContact(first.sourceComponentId,
+                first.minimumVertexId, first.sourceWalkId, first.probeStart, first.probeEnd,
+                first.examinedOtherEdges)
+            val noContact = Approach.Borrowed(f.owner, genuine.contacts,
+                listOf(genuine.records[0], Approach.NoForeignContact(falseNoContact)))
+            val actual = genuine.records[1] as Approach.VertexSectorApproach
+            val falseTarget = Approach.Borrowed(f.owner, genuine.contacts, listOf(genuine.records[0],
+                actual.copy(sector = actual.sector.copy(targetWalkId = 99))))
+            assertTrue(genuine.contacts.isAuthenticatedFor(f.owner))
+            assertFalse(noContact.isAuthenticatedFor(f.owner))
+            assertFalse(falseTarget.isAuthenticatedFor(f.owner))
+            assertTrue(genuine.isAuthenticatedFor(f.owner))
+        }
+    }
+
+    @Test fun workloadFailureNeverPublishesAuthenticatedApproach() {
+        tip().use { f ->
+            val remaining = f.budget.limits.query.getValue(SelectionQueryResource.WORK_UNITS) -
+                f.budget.used(SelectionQueryResource.WORK_UNITS)
+            assertNull(f.budget.charge(SelectionQueryResource.WORK_UNITS, remaining))
+            val result = Approach.build(f.owner, f.rays)
+            assertTrue(result is Approach.Result.Unresolved)
+            assertEquals(SelectionQueryResource.WORK_UNITS, failure(result).resource)
+            assertEquals(0L, f.budget.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertThrows(IllegalStateException::class.java) { f.owner.segments }
+        }
+    }
+
+    @Test fun cancellationAtPublicationCannotReturnCompletedApproach() {
+        var armed = false; var injected = false
+        val b = SelectionQueryBudget(cancellationCheckpoint = {
+            if (armed && Thread.currentThread().stackTrace.any {
+                it.className.contains("SelectionLassoContactApproachEvidence") && it.methodName == "publish"
+            }) { injected = true; throw CancellationException() }
+        })
+        tip(b).use { f ->
+            var result: Approach.Result? = null
+            armed = true
+            assertThrows(CancellationException::class.java) { result = Approach.build(f.owner, f.rays) }
+            assertTrue(injected)
+            assertNull(result)
+            assertNull(b.failure)
+            assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertThrows(IllegalStateException::class.java) { f.owner.segments }
+        }
+    }
+
     @Test fun emptyIsolatedAndNoContactKeepDistinctVariants() {
         production(emptyList()).use { assertTrue(build(it).records.isEmpty()) }
         graph(listOf(p(0, 0), p(1, 1)), emptyList()).use { f ->
