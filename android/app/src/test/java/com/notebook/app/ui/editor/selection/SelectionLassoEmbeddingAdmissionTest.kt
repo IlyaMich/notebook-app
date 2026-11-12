@@ -105,6 +105,160 @@ class SelectionLassoEmbeddingAdmissionTest {
         return SelectionLassoSuccessorCycles.Borrowed(f.owner, s, walks, membership)
     }
 
+
+    @Test fun completedEmptyAndAcceptedTopologiesAuthenticateForOriginalOwner() {
+        val retrace = listOf(p(0, 0), p(2, 0), p(0, 0), p(2, 0))
+        val bridge = listOf(p(0, 0), p(2, 0), p(0, 2), p(0, 0),
+            p(5, 0), p(7, 0), p(5, 2), p(5, 0))
+        for (input in listOf(emptyList(), triangle, square, bowTie, retrace, triangle + triangle, bridge)) {
+            production(input).use { f ->
+                val evidence = admit(f)
+                assertTrue(evidence.isAuthenticatedFor(f.owner))
+                assertSame(f.cycles, evidence.cycles)
+                assertEquals(f.cycles.adjacency.vertices.size, evidence.record.vertexCount)
+                assertEquals(f.cycles.adjacency.edgeGroups.size, evidence.record.edgeGroupCount)
+                assertEquals(0L, f.budget.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            }
+        }
+    }
+
+    @Test fun syntheticConstructorsCopiedRecordsAndSubclassesRemainUnauthenticated() {
+        twoEdges().use { f ->
+            val genuine = admit(f)
+            val copied = SelectionLassoEmbeddingAdmission.Borrowed(f.owner, f.cycles, genuine.record.copy())
+            val sameRecord = SelectionLassoEmbeddingAdmission.Borrowed(f.owner, f.cycles, genuine.record)
+            val fabricated = SelectionLassoEmbeddingAdmission.Borrowed(f.owner, f.cycles,
+                genuine.record.copy(examinedEdgePairs = 999, examinedNonincidentVertexEdgeRelations = 999))
+            val subclass = object : SelectionLassoEmbeddingAdmission.Borrowed(f.owner, f.cycles, genuine.record) {}
+            for (candidate in listOf(copied, sameRecord, fabricated, subclass))
+                assertFalse(candidate.isAuthenticatedFor(f.owner))
+            assertTrue(genuine.isAuthenticatedFor(f.owner))
+        }
+    }
+
+    @Test fun authenticationIsPureForBothArmedOwnersAndSeparateFromClosedLifetime() {
+        var armed = false; var primaryCallbacks = 0; var foreignCallbacks = 0
+        val b = SelectionQueryBudget(cancellationCheckpoint = {
+            primaryCallbacks++; if (armed) throw CancellationException()
+        })
+        val foreignBudget = SelectionQueryBudget(cancellationCheckpoint = {
+            foreignCallbacks++; if (armed) throw CancellationException()
+        })
+        twoEdges(b).use { f ->
+            production(emptyList(), foreignBudget).use { foreign ->
+                val genuine = admit(f)
+                val other = admit(foreign)
+                val primaryCounters = SelectionQueryResource.entries.map { b.used(it) }
+                val foreignCounters = SelectionQueryResource.entries.map { foreignBudget.used(it) }
+                val primaryFailure = b.failure; val foreignFailure = foreignBudget.failure
+                val primaryBefore = primaryCallbacks; val foreignBefore = foreignCallbacks
+                armed = true
+                repeat(3) {
+                    assertTrue(genuine.isAuthenticatedFor(f.owner))
+                    assertFalse(genuine.isAuthenticatedFor(foreign.owner))
+                    assertFalse(other.isAuthenticatedFor(f.owner))
+                }
+                assertEquals(primaryBefore, primaryCallbacks); assertEquals(foreignBefore, foreignCallbacks)
+                assertEquals(primaryCounters, SelectionQueryResource.entries.map { b.used(it) })
+                assertEquals(foreignCounters, SelectionQueryResource.entries.map { foreignBudget.used(it) })
+                assertSame(primaryFailure, b.failure); assertSame(foreignFailure, foreignBudget.failure)
+                f.owner.close()
+                val closedCounters = SelectionQueryResource.entries.map { b.used(it) }
+                assertTrue(genuine.isAuthenticatedFor(f.owner))
+                assertFalse(genuine.isAuthenticatedFor(foreign.owner))
+                assertEquals(primaryBefore, primaryCallbacks); assertEquals(foreignBefore, foreignCallbacks)
+                assertEquals(closedCounters, SelectionQueryResource.entries.map { b.used(it) })
+                assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+                assertThrows(IllegalStateException::class.java) { genuine.record }
+                assertThrows(IllegalStateException::class.java) { genuine.cycles }
+                assertThrows(IllegalStateException::class.java) { genuine.exact { rational(0) } }
+                armed = false
+                assertEquals(7, known(foreign.owner.exact { 7 }))
+                assertTrue(other.isAuthenticatedFor(foreign.owner))
+            }
+        }
+    }
+
+    @Test fun failedGeometricAdmissionCannotPublishCompletedEvidence() {
+        val fixtures = listOf(
+            graph(listOf(p(0, 0), p(2, 2), p(0, 2), p(2, 0)), listOf(0 to 1, 2 to 3)),
+            graph(listOf(p(0, 0), p(4, 0), p(1, 0), p(3, 0)), listOf(0 to 1, 2 to 3)),
+            graph(listOf(p(0, 0), p(2, 0), p(1, 0)), listOf(0 to 1)),
+        )
+        try {
+            for ((i, f) in fixtures.withIndex()) {
+                val result = SelectionLassoEmbeddingAdmission.build(f.owner, f.cycles)
+                assertTrue(result is Result.InvalidInput)
+                assertEquals(listOf(InvalidReason.UNSPLIT_CROSSING,
+                    InvalidReason.POSITIVE_LENGTH_OVERLAP, InvalidReason.UNSPLIT_VERTEX)[i],
+                    (result as Result.InvalidInput).reason)
+                assertEquals(0L, f.budget.used(SelectionQueryResource.TEMPORARY_BYTES))
+                assertThrows(IllegalStateException::class.java) { f.owner.segments }
+            }
+        } finally { fixtures.forEach { it.close() } }
+    }
+
+    @Test fun finalPublicationWorkFailurePreventsAuthenticationAfterFullScans() {
+        var armed = false; var exhausted = false
+        var pairs = false; var vertices = false
+        lateinit var b: SelectionQueryBudget
+        b = SelectionQueryBudget(cancellationCheckpoint = {
+            if (armed) {
+                if (inPhase("scanPairs")) pairs = true
+                if (inPhase("checkVertices")) vertices = true
+                if (!exhausted && inPhase("publish")) {
+                    exhausted = true
+                    b.charge(SelectionQueryResource.WORK_UNITS,
+                        b.limits.query.getValue(SelectionQueryResource.WORK_UNITS) -
+                            b.used(SelectionQueryResource.WORK_UNITS))
+                }
+            }
+        })
+        twoEdges(b).use { f ->
+            armed = true
+            val result = SelectionLassoEmbeddingAdmission.build(f.owner, f.cycles)
+            assertEquals(SelectionQueryResource.WORK_UNITS, failure(result).resource)
+            assertTrue(pairs); assertTrue(vertices); assertTrue(exhausted)
+            assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            assertThrows(IllegalStateException::class.java) { f.owner.segments }
+        }
+    }
+
+    @Test fun cancellationDuringScansAndFinalPublicationNeverReturnsCompletedBorrower() {
+        for (phase in listOf("scanPairs", "checkVertices", "publish")) {
+            var armed = false; var injected = false
+            val b = SelectionQueryBudget(cancellationCheckpoint = {
+                if (armed && inPhase(phase)) { injected = true; throw CancellationException() }
+            })
+            twoEdges(b).use { f ->
+                var result: Result? = null
+                armed = true
+                assertThrows(CancellationException::class.java) {
+                    result = SelectionLassoEmbeddingAdmission.build(f.owner, f.cycles)
+                }
+                assertTrue(injected); assertNull(result); assertNull(b.failure)
+                assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+                assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+                assertThrows(IllegalStateException::class.java) { f.owner.segments }
+            }
+        }
+    }
+
+    @Test fun stickyFailureCannotAuthenticateEmptyEmbedding() {
+        production(emptyList()).use { f ->
+            val b = f.budget
+            val sticky = b.charge(SelectionQueryResource.WORK_UNITS,
+                b.limits.query.getValue(SelectionQueryResource.WORK_UNITS) -
+                    b.used(SelectionQueryResource.WORK_UNITS) + 1)
+            assertNotNull(sticky)
+            assertSame(sticky, failure(SelectionLassoEmbeddingAdmission.build(f.owner, f.cycles)))
+            assertEquals(0L, b.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertEquals(0L, b.used(SelectionQueryResource.ARRANGEMENT_FACES))
+            assertThrows(IllegalStateException::class.java) { f.owner.segments }
+        }
+    }
+
     @Test fun emptyAndSingleEdgeEmbeddingsDoNotRequireAreaOrFaces() {
         for (input in listOf(emptyList(), listOf(p(0, 0)), listOf(p(0, 0), p(2, 0)))) production(input).use {
             val e = admit(it)

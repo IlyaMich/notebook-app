@@ -35,7 +35,7 @@ internal object SelectionLassoEmbeddingAdmission {
         ) : Result
         data class Unresolved(val cause: SelectionPredicateResult<Nothing>) : Result
     }
-    class Borrowed internal constructor(
+    open class Borrowed internal constructor(
         private val owner: Prepared,
         private val source: SelectionLassoSuccessorCycles.Borrowed,
         private val evidence: Record,
@@ -43,9 +43,15 @@ internal object SelectionLassoEmbeddingAdmission {
         val cycles: SelectionLassoSuccessorCycles.Borrowed get() { owner.segments; return source }
         val record: Record get() { owner.segments; return evidence }
         internal fun isOwnedBy(prepared: Prepared): Boolean = owner === prepared
+        /** Pure historical completion identity; normal getters still enforce owner liveness. */
+        internal fun isAuthenticatedFor(prepared: Prepared): Boolean = owner === prepared && this is Completed
         fun <T> exact(action: SelectionExactArithmetic.() -> T): SelectionPredicateResult<T> =
             owner.exact(action)
     }
+    /** Private final subtype: copied records and ordinary internal subclasses cannot mint it. */
+    private class Completed(owner: Prepared, source: SelectionLassoSuccessorCycles.Borrowed,
+        evidence: Record) : Borrowed(owner, source, evidence)
+
     private class Invalid(val result: Result.InvalidInput) : RuntimeException()
     private class Unresolved(val outcome: SelectionPredicateResult<Nothing>) : RuntimeException()
     private fun verify(
@@ -88,8 +94,7 @@ internal object SelectionLassoEmbeddingAdmission {
                 retainRecord(256) // evidence, borrower and working/output references
                 Record(adjacency.vertices.size, adjacency.edgeGroups.size, pairs, relations)
             })
-            value(prepared.exact { chargeIncidentLassoWork() }) // final cancellation checkpoint
-            val result = Borrowed(prepared, cycles, record)
+            val result = value(prepared.exact { publish(prepared, cycles, record) })
             success = true
             return Result.Ready(result)
         } catch (invalid: Invalid) {
@@ -99,6 +104,14 @@ internal object SelectionLassoEmbeddingAdmission {
         } finally {
             if (!success) prepared.close()
         }
+    }
+
+    /** All geometry scans and evidence admission precede this final publication checkpoint. */
+    private fun SelectionExactArithmetic.publish(
+        owner: Prepared, cycles: SelectionLassoSuccessorCycles.Borrowed, record: Record,
+    ): Borrowed {
+        chargeIncidentLassoWork()
+        return Completed(owner, cycles, record)
     }
 
     private fun SelectionExactArithmetic.owns(p: Point) =
