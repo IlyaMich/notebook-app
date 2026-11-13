@@ -29,6 +29,11 @@ import com.notebook.app.ui.editor.selection.SelectionRobustPredicates.Sign
  * lasso lies beyond one extreme support line of the local stroke, and an active fill edge
  * contains the unique extremal stroke point, only boundary contact is possible. This does
  * not guess tangency for an arbitrary oblique line or an unresolved subdivision cell.
+ * A subsequent narrow certificate also recognizes selected rational, NONAXIAL supporting
+ * normals. Each chosen normal is proved to be a unit vector, parallel to the exact ellipse
+ * normal at an exact rational centerline point. Only source-wide half-plane separation and
+ * exact active-edge containment of the resulting stroke support point authorize contact.
+ * Other oblique normals remain unresolved; there is no polygonal outline approximation.
  *
  * Budgeted subdivision is intentionally bounded. Pure geometry only; no page clipping,
  * renderer certification, visible-element HIT, or finite DU tolerance policy.
@@ -234,8 +239,6 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
         val centerlineWitness = point(add(center.x, rx), center.y)
         val witness = point(add(add(multiply(aa, centerlineWitness.x), multiply(cc, centerlineWitness.y)), tx),
             add(add(multiply(bb, centerlineWitness.x), multiply(dd, centerlineWitness.y)), ty))
-        var boundaryOverlap = false
-        var certifiedAllSeparated = true
         var witnessOdd = false
         var observed = 0L
         var previousStart = -1; var previousEnd = -1
@@ -277,25 +280,17 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
             if (!toggles[i]) continue
             // If the global support-line prepass succeeded, only the exact contact
             // point can meet the ellipse stroke. No arc subdivision is needed.
-            val localA = local(group.start)
-            val localB = local(group.end)
             if (hasAxialSupport) {
+                val localA = local(group.start)
+                val localB = local(group.end)
                 for (axis in 0 until 4) {
                     chargeIncidentLassoWork(2)
                     if (allBeyond[axis] && !touchesExtreme[axis] &&
                         onSegment(extreme[axis], localA, localB)) touchesExtreme[axis] = true
                 }
             }
-
-            // Validate every group even if earlier evidence proved an overlap.
-            if (!hasAxialSupport && !boundaryOverlap) {
-                when (certifyEdge(localA, localB, center,
-                    rx, ry, radiusSquared, zero, one)) {
-                    EdgeCertificate.OVERLAP -> boundaryOverlap = true
-                    EdgeCertificate.SEPARATED -> Unit
-                    EdgeCertificate.UNRESOLVED -> certifiedAllSeparated = false
-                }
-            }
+            // Do not subdivide here. This first pass validates EVERY source association
+            // and establishes point parity before trying any expensive curve cells.
             // Half-open exact ray from the centerline point; on-boundary is already
             // covered by strict-distance overlap because stroke radius is positive.
             val ay = compare(group.start.y, witness.y)
@@ -316,9 +311,36 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
         // At an ellipse stroke's axial extreme that support line touches the stroke at
         // precisely one point. A point on an active fill edge certifies pure contact.
         val axialContact = (0 until 4).any { allBeyond[it] && touchesExtreme[it] }
+        // Attempt the cheap, exact global oblique support certificate AFTER checking
+        // all source associations, but BEFORE costly rational arc subdivision. At exact
+        // tangency subdivision cannot prove strict separation and otherwise exhausts the
+        // owner's temporary-byte budget before this proof can run. Do not enlarge quotas.
+        val oblique = if (!hasAxialSupport && !witnessOdd) certifyRationalObliqueSupport(
+            vertices, groups, toggles, ::local,
+            center, rx, ry, stroke, zero, one) else null
+
+        // Only unresolved geometry needs the bounded arc search. All graph associations
+        // were checked in the first pass, so this second pass can stop on an exact
+        // strict-overlap witness without weakening mutation or source-ownership checks.
+        var boundaryOverlap = false
+        var certifiedAllSeparated = true
+        if (!hasAxialSupport && !witnessOdd && oblique == null) {
+            for (i in groups.indices) {
+                if (!toggles[i]) continue
+                chargeIncidentLassoWork(2)
+                val group = groups[i]
+                when (certifyEdge(local(group.start), local(group.end), center,
+                    rx, ry, radiusSquared, zero, one)) {
+                    EdgeCertificate.OVERLAP -> { boundaryOverlap = true; break }
+                    EdgeCertificate.SEPARATED -> Unit
+                    EdgeCertificate.UNRESOLVED -> certifiedAllSeparated = false
+                }
+            }
+        }
         val relation = when {
             hasAxialSupport -> if (axialContact) Relation.BOUNDARY_ONLY_CONTACT else Relation.DISJOINT
-            boundaryOverlap || witnessOdd -> Relation.INTERIOR_OVERLAP
+            witnessOdd || boundaryOverlap -> Relation.INTERIOR_OVERLAP
+            oblique != null -> oblique
             certifiedAllSeparated -> Relation.DISJOINT
             else -> throw Unresolved(SelectionPredicateResult.Indeterminate(
                 SelectionNumericalReason.UNCERTIFIED_COMPARISON))
@@ -326,6 +348,88 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
         retainRecord(256)
         chargeIncidentLassoWork() // final cancellation and resource checkpoint
         return Completed(owner, region, ellipse, affine, relation)
+    }
+
+    /**
+     * Bounded exact support-point witnesses for selected rational oblique normals.
+     * For a point E on the ellipse and unit outward normal u, E+r*u is the UNIQUE
+     * stroke extreme in direction u (support of an ellipse Minkowski-summed with a disk).
+     * An authenticated lasso contained in dot(u, X-(E+r*u)) >= 0 can meet the stroke
+     * only at that point. Active fill-edge containment proves boundary-only contact;
+     * otherwise the filled region and stroke are disjoint.
+     *
+     * Rational quarter-ellipse samples and Pythagorean unit normals are finite proof
+     * CANDIDATES, never a sampled geometric approximation or authority for a miss.
+     */
+    private fun SelectionExactArithmetic.certifyRationalObliqueSupport(
+        vertices: List<SelectionLassoCoincidentGeometry.Vertex>,
+        groups: List<SelectionLassoCoincidentGeometry.EdgeGroup>,
+        toggles: List<Boolean>,
+        local: (Point) -> Point,
+        center: Point, rx: Rational, ry: Rational, stroke: Rational,
+        zero: Rational, one: Rational,
+    ): Relation? {
+        chargeIncidentLassoWork()
+        verify(groups.size == toggles.size && vertices.isNotEmpty(), InvalidReason.GROUP_ASSOCIATION)
+        retainRecord(512)
+        val two = rational(2)
+        val rxSquared = multiply(rx, rx); val rySquared = multiply(ry, ry)
+        // All these binary-free ratios are exact rationals; every base direction has norm 1.
+        // The finite table is a certification opportunity, NOT an exhaustive angular sweep.
+        val bases = listOf(
+            point(rational(3, 5), rational(4, 5)),
+            point(rational(4, 5), rational(3, 5)),
+            point(rational(5, 13), rational(12, 13)),
+            point(rational(12, 13), rational(5, 13)),
+        )
+        val parameters = listOf(rational(1, 5), rational(1, 4),
+            rational(1, 3), rational(1, 2), rational(3, 5))
+        for (quadrant in 0 until 4) {
+            chargeIncidentLassoWork()
+            val negativeX = quadrant == 1 || quadrant == 2
+            val negativeY = quadrant == 2 || quadrant == 3
+            val units = bases.map { base ->
+                chargeIncidentLassoWork(2)
+                point(if (negativeX) subtract(zero, base.x) else base.x,
+                    if (negativeY) subtract(zero, base.y) else base.y)
+            }
+            for (t in parameters) {
+                chargeIncidentLassoWork(2)
+                val e = ellipsePoint(quadrant, t, center, rx, ry, one, two)
+                // (E-C)/radii^2 is exactly normal to the implicit ellipse.
+                val normal = point(divide(subtract(e.x, center.x), rxSquared),
+                    divide(subtract(e.y, center.y), rySquared))
+                for (u in units) {
+                    chargeIncidentLassoWork(3)
+                    // Parallel, positively aligned, and unit length; all exact.
+                    if (sign(cross(normal, u)) != Sign.ZERO ||
+                        sign(dot(normal, u)) != Sign.POSITIVE) continue
+                    verify(compare(squared(u), one) == Sign.ZERO, InvalidReason.GROUP_ASSOCIATION)
+                    val support = point(add(e.x, multiply(stroke, u.x)),
+                        add(e.y, multiply(stroke, u.y)))
+                    var beyond = true
+                    for (v in vertices) {
+                        chargeIncidentLassoWork(2)
+                        if (sign(dot(vector(local(v.point), support), u)) == Sign.NEGATIVE) {
+                            beyond = false
+                            break
+                        }
+                    }
+                    if (!beyond) continue
+                    var activeContact = false
+                    for (i in groups.indices) {
+                        chargeIncidentLassoWork()
+                        if (toggles[i] && onSegment(support,
+                            local(groups[i].start), local(groups[i].end))) {
+                            activeContact = true
+                            break
+                        }
+                    }
+                    return if (activeContact) Relation.BOUNDARY_ONLY_CONTACT else Relation.DISJOINT
+                }
+            }
+        }
+        return null
     }
 
     /** Exact closed-segment containment, with no Double endpoints or tolerance. */

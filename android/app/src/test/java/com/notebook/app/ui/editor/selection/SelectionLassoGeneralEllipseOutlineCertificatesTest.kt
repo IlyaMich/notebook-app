@@ -176,16 +176,69 @@ class SelectionLassoGeneralEllipseOutlineCertificatesTest {
         }
     }
 
-    @Test fun NonAxialExactTangencyRemainsUnresolvedRatherThanClaimingMiss() {
-        // Ellipse radii 4 and 5/4, stroke 1/2. Along normal (3,4), the
-        // exact support is sqrt(12^2+5^2) + (1/2)*5 = 31/2.
-        // The source triangle is entirely beyond 3*x + 4*y = 31/2 and its
-        // first edge lies on that line, with contact at a NONAXIAL ellipse point.
+    @Test fun ExactObliqueThreeFourSupportTangencyIsCertified() {
+        // Ellipse radii 4 and 5/4, stroke 1/2. Unit normal u=(3/5,4/5).
+        // The exact ellipse normal at rational quarter parameter t=1/5 is u.
+        // Support: 3*x+4*y=31/2; source triangle is beyond it and its odd
+        // edge contains the unique stroked-ellipse support point.
         val lasso = listOf(p(1.5, 2.75), p(5.5, -0.25), p(6.5, 3))
         production(lasso).use { f ->
+            assertRelation(f, oval(-4, -1.25, 8, 2.5, 0.5), touch)
+        }
+    }
+
+    @Test fun ExactObliqueFourThreeSupportTangencyIsCertified() {
+        // Ellipse radii (2,5), outward unit normal (4/5,3/5).
+        // t=3/5 yields exact stroked support 4*x+3*y=39/2.
+        val lasso = listOf(p(0, 6.5), p(4.875, 0), p(6, 8))
+        production(lasso).use { f ->
+            assertRelation(f, oval(-2, -5, 4, 10, 0.5), touch)
+        }
+    }
+
+    @Test fun ExactObliqueFiveTwelveSupportTangencyIsCertified() {
+        // Ellipse radii (9,2), u=(5/13,12/13), t=1/4.
+        // Unique stroke support: 5*x+12*y=115/2.
+        val lasso = listOf(p(-0.5, 5), p(11.5, 0), p(12.5, 6))
+        production(lasso).use { f ->
+            assertRelation(f, oval(-9, -2, 18, 4, 0.5), touch)
+        }
+    }
+
+    @Test fun ObliqueContactCertificateSurvivesReflectionAndShear() {
+        val base = listOf(p(1.5, 2.75), p(5.5, -0.25), p(6.5, 3))
+        // Exactly representable reflection and shear preserve support contact.
+        val reflected = base.map { p(10.0 - it.x, it.y) }
+        production(reflected).use { f ->
+            assertRelation(f, oval(-4, -1.25, 8, 2.5, 0.5), touch,
+                affine(-1.0, 0.0, 0.0, 1.0, 10.0, 0.0))
+        }
+        val sheared = base.map { p(it.x + 0.5 * it.y + 2.0, it.y) }
+        production(sheared).use { f ->
+            assertRelation(f, oval(-4, -1.25, 8, 2.5, 0.5), touch,
+                affine(1.0, 0.0, 0.5, 1.0, 2.0, 0.0))
+        }
+    }
+
+    @Test fun StrictlyMovingAcrossObliqueSupportDoesNotCreateFalseTangency() {
+        val base = listOf(p(1.5, 2.75), p(5.5, -0.25), p(6.5, 3))
+        production(base.map { p(it.x - 0.25, it.y) }).use { f ->
+            assertRelation(f, oval(-4, -1.25, 8, 2.5, 0.5), inside)
+        }
+        production(base.map { p(it.x + 0.25, it.y) }).use { f ->
+            assertRelation(f, oval(-4, -1.25, 8, 2.5, 0.5), outside)
+        }
+    }
+
+    @Test fun UnsampledEightFifteenExactTangencyRemainsUnresolved() {
+        // A real nonaxial exact tangency at direction (8/17,15/17).
+        // The finite rational unit-normal table intentionally does NOT include it.
+        // Radii (5,2), stroke 1/2, support 8*x+15*y=117/2.
+        val lasso = listOf(p(2.625, 2.5), p(6.375, 0.5), p(9, 5))
+        production(lasso).use { f ->
             val result = Intersection.intersect(f.owner, f.region,
-                oval(-4, -1.25, 8, 2.5, 0.5), identity)
-            assertTrue("Unsupported exact oblique tangency must remain unresolved: $result",
+                oval(-5, -2, 10, 4, 0.5), identity)
+            assertTrue("Uncertified exact oblique tangency must not be guessed: $result",
                 result is Intersection.Result.Unresolved)
             assertEquals(0L, f.budget.used(SelectionQueryResource.TEMPORARY_BYTES))
         }
