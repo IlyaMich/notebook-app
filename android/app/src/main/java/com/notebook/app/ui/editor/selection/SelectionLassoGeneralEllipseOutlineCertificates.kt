@@ -25,11 +25,16 @@ import com.notebook.app.ui.editor.selection.SelectionRobustPredicates.Sign
  * is already certified regardless of unresolved boundary intervals. Otherwise any remaining
  * uncertainty returns typed Indeterminate; no rounded, sampled or tolerance-based MISS/HIT.
  *
+ * Exact axial tangencies receive a separate half-plane certificate: if the entire filled
+ * lasso lies beyond one extreme support line of the local stroke, and an active fill edge
+ * contains the unique extremal stroke point, only boundary contact is possible. This does
+ * not guess tangency for an arbitrary oblique line or an unresolved subdivision cell.
+ *
  * Budgeted subdivision is intentionally bounded. Pure geometry only; no page clipping,
  * renderer certification, visible-element HIT, or finite DU tolerance policy.
  */
 internal object SelectionLassoGeneralEllipseOutlineCertificates {
-    enum class Relation { INTERIOR_OVERLAP, DISJOINT }
+    enum class Relation { INTERIOR_OVERLAP, BOUNDARY_ONLY_CONTACT, DISJOINT }
     enum class InvalidReason {
         OWNER_CLOSED, OWNER_MISMATCH, UNAUTHENTICATED_REGION, SOURCE_ASSOCIATION,
         INVALID_ELLIPSE, INVALID_AFFINE, FACE_MAPPING, GROUP_ASSOCIATION, COUNT_OVERFLOW,
@@ -182,6 +187,24 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
         val stroke = fromDouble(ellipse.outlineRadius)
         val radiusSquared = multiply(stroke, stroke)
         val zero = rational(0); val one = rational(1)
+        // Unique local support points of the true distance-r stroke, in axis order:
+        // right, left, bottom, top. Their coordinates are exact rational sums.
+        val right = add(add(center.x, rx), stroke)
+        val left = subtract(subtract(center.x, rx), stroke)
+        val bottom = add(add(center.y, ry), stroke)
+        val top = subtract(subtract(center.y, ry), stroke)
+        retainRecord(384)
+        val extreme = listOf(point(right, center.y), point(left, center.y),
+            point(center.x, bottom), point(center.x, top))
+        val allBeyond = BooleanArray(4) { true }
+        val touchesExtreme = BooleanArray(4)
+        fun beyond(p: Point, axis: Int): Boolean = when (axis) {
+            0 -> compare(p.x, right) != Sign.NEGATIVE
+            1 -> compare(p.x, left) != Sign.POSITIVE
+            2 -> compare(p.y, bottom) != Sign.NEGATIVE
+            3 -> compare(p.y, top) != Sign.POSITIVE
+            else -> error("Axis invariant")
+        }
         val aa = fromDouble(c[0]); val bb = fromDouble(c[1]); val cc = fromDouble(c[2])
         val dd = fromDouble(c[3]); val tx = fromDouble(c[4]); val ty = fromDouble(c[5])
         val determinant = subtract(multiply(aa, dd), multiply(bb, cc))
@@ -192,9 +215,25 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
             return point(divide(subtract(multiply(dd, x), multiply(cc, y)), determinant),
                 divide(subtract(multiply(aa, y), multiply(bb, x)), determinant))
         }
-        val extreme = point(add(center.x, rx), center.y) // exact point on ellipse centerline
-        val witness = point(add(add(multiply(aa, extreme.x), multiply(cc, extreme.y)), tx),
-            add(add(multiply(bb, extreme.x), multiply(dd, extreme.y)), ty))
+        // A whole source made of straight segments is contained in the convex hull of
+        // its vertices. If ALL vertices lie beyond an extreme stroke support line,
+        // there cannot be any interior overlap. This prepass avoids expensive arc
+        // subdivision in precisely the hard equality cases it can certify.
+        for (i in vertices.indices) {
+            chargeIncidentLassoWork(4)
+            val vertex = vertices[i]
+            verify(vertex.id == i && vertex.point.x.context === this &&
+                vertex.point.y.context === this, InvalidReason.GROUP_ASSOCIATION)
+            val q = local(vertex.point)
+            for (axis in 0 until 4) {
+                chargeIncidentLassoWork()
+                if (allBeyond[axis] && !beyond(q, axis)) allBeyond[axis] = false
+            }
+        }
+        val hasAxialSupport = allBeyond.any { it }
+        val centerlineWitness = point(add(center.x, rx), center.y)
+        val witness = point(add(add(multiply(aa, centerlineWitness.x), multiply(cc, centerlineWitness.y)), tx),
+            add(add(multiply(bb, centerlineWitness.x), multiply(dd, centerlineWitness.y)), ty))
         var boundaryOverlap = false
         var certifiedAllSeparated = true
         var witnessOdd = false
@@ -236,10 +275,21 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
                 (faceParity[fa].isOdd xor faceParity[fb].isOdd) == toggles[i],
                 InvalidReason.FACE_MAPPING)
             if (!toggles[i]) continue
+            // If the global support-line prepass succeeded, only the exact contact
+            // point can meet the ellipse stroke. No arc subdivision is needed.
+            val localA = local(group.start)
+            val localB = local(group.end)
+            if (hasAxialSupport) {
+                for (axis in 0 until 4) {
+                    chargeIncidentLassoWork(2)
+                    if (allBeyond[axis] && !touchesExtreme[axis] &&
+                        onSegment(extreme[axis], localA, localB)) touchesExtreme[axis] = true
+                }
+            }
 
             // Validate every group even if earlier evidence proved an overlap.
-            if (!boundaryOverlap) {
-                when (certifyEdge(local(group.start), local(group.end), center,
+            if (!hasAxialSupport && !boundaryOverlap) {
+                when (certifyEdge(localA, localB, center,
                     rx, ry, radiusSquared, zero, one)) {
                     EdgeCertificate.OVERLAP -> boundaryOverlap = true
                     EdgeCertificate.SEPARATED -> Unit
@@ -261,7 +311,13 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
             }
         }
         verify(observed == parity.verifiedOccurrenceCount, InvalidReason.SOURCE_ASSOCIATION)
+        // The odd filled set is contained in the convex hull of its source segments.
+        // Its open interior therefore cannot enter the opposite side of a support line.
+        // At an ellipse stroke's axial extreme that support line touches the stroke at
+        // precisely one point. A point on an active fill edge certifies pure contact.
+        val axialContact = (0 until 4).any { allBeyond[it] && touchesExtreme[it] }
         val relation = when {
+            hasAxialSupport -> if (axialContact) Relation.BOUNDARY_ONLY_CONTACT else Relation.DISJOINT
             boundaryOverlap || witnessOdd -> Relation.INTERIOR_OVERLAP
             certifiedAllSeparated -> Relation.DISJOINT
             else -> throw Unresolved(SelectionPredicateResult.Indeterminate(
@@ -270,6 +326,16 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
         retainRecord(256)
         chargeIncidentLassoWork() // final cancellation and resource checkpoint
         return Completed(owner, region, ellipse, affine, relation)
+    }
+
+    /** Exact closed-segment containment, with no Double endpoints or tolerance. */
+    private fun SelectionExactArithmetic.onSegment(p: Point, a: Point, b: Point): Boolean {
+        chargeIncidentLassoWork(3)
+        if ((compare(p.x, a.x) == Sign.NEGATIVE && compare(p.x, b.x) == Sign.NEGATIVE) ||
+            (compare(p.x, a.x) == Sign.POSITIVE && compare(p.x, b.x) == Sign.POSITIVE) ||
+            (compare(p.y, a.y) == Sign.NEGATIVE && compare(p.y, b.y) == Sign.NEGATIVE) ||
+            (compare(p.y, a.y) == Sign.POSITIVE && compare(p.y, b.y) == Sign.POSITIVE)) return false
+        return sign(cross(vector(b, a), vector(p, a))) == Sign.ZERO
     }
 
     private enum class EdgeCertificate { OVERLAP, SEPARATED, UNRESOLVED }

@@ -89,6 +89,7 @@ class SelectionLassoGeneralEllipseOutlineCertificatesTest {
     private fun oval(x: Number, y: Number, width: Number, height: Number, stroke: Number) =
         SelectionPaintGeometry.Primitive.Ellipse(frame(x, y, width, height), stroke.toDouble(), false)
     private val inside = Intersection.Relation.INTERIOR_OVERLAP
+    private val touch = Intersection.Relation.BOUNDARY_ONLY_CONTACT
     private val outside = Intersection.Relation.DISJOINT
 
     private fun assertRelation(
@@ -148,12 +149,53 @@ class SelectionLassoGeneralEllipseOutlineCertificatesTest {
         }
     }
 
-    @Test fun ExactTangencyIsUnresolvedRatherThanInventedMiss() {
+    @Test fun ExactAxisTangencyIsCertifiedBoundaryOnly() {
         production(square).use { f ->
+            assertRelation(f, oval(4.5, 1, 4, 2, 0.5), touch)
+            assertRelation(f, oval(-4.5, 1, 4, 2, 0.5), touch)
+            assertRelation(f, oval(1, 4.5, 2, 4, 0.5), touch)
+            assertRelation(f, oval(1, -4.5, 2, 4, 0.5), touch)
+        }
+    }
+
+    @Test fun TouchAtOnlyAnOddBoundaryVertexStillProvesContact() {
+        production(triangle).use { f ->
+            assertRelation(f, oval(4.5, -1, 4, 2, 0.5), touch)
+        }
+    }
+
+    @Test fun CertifiedAxialTouchSurvivesReflectionAndShear() {
+        production(square).use { f ->
+            assertRelation(f, oval(4.5, 1, 4, 2, 0.5), touch,
+                affine(-1.0, 0.0, 0.0, 1.0, 13.0, 0.0))
+        }
+        val shearedSquare = listOf(p(0,0),p(4,0),p(6,4),p(2,4))
+        production(shearedSquare).use { f ->
+            assertRelation(f, oval(4.5, 1, 4, 2, 0.5), touch,
+                affine(1.0, 0.0, 0.5, 1.0, 0.0, 0.0))
+        }
+    }
+
+    @Test fun NonAxialExactTangencyRemainsUnresolvedRatherThanClaimingMiss() {
+        // Ellipse radii 4 and 5/4, stroke 1/2. Along normal (3,4), the
+        // exact support is sqrt(12^2+5^2) + (1/2)*5 = 31/2.
+        // The source triangle is entirely beyond 3*x + 4*y = 31/2 and its
+        // first edge lies on that line, with contact at a NONAXIAL ellipse point.
+        val lasso = listOf(p(1.5, 2.75), p(5.5, -0.25), p(6.5, 3))
+        production(lasso).use { f ->
             val result = Intersection.intersect(f.owner, f.region,
-                oval(4.5, 1, 4, 2, 0.5), identity)
-            assertTrue("Expected unresolved tangency, got $result", result is Intersection.Result.Unresolved)
+                oval(-4, -1.25, 8, 2.5, 0.5), identity)
+            assertTrue("Unsupported exact oblique tangency must remain unresolved: $result",
+                result is Intersection.Result.Unresolved)
             assertEquals(0L, f.budget.used(SelectionQueryResource.TEMPORARY_BYTES))
+        }
+    }
+
+    @Test fun TangencyProofCannotOverrideRealInteriorOverlap() {
+        production(square).use { f ->
+            assertRelation(f, oval(4.5, 1, 4, 2, 0.625), inside)
+            assertRelation(f, oval(4.5, 1, 4, 2, 0.375), outside)
+            assertRelation(f, oval(1, 1, 4, 2, 0.5), inside)
         }
     }
 
