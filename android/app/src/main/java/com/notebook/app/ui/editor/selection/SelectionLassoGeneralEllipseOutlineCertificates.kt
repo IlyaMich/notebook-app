@@ -33,7 +33,9 @@ import com.notebook.app.ui.editor.selection.SelectionRobustPredicates.Sign
  * normals. Each chosen normal is proved to be a unit vector, parallel to the exact ellipse
  * normal at an exact rational centerline point. Only source-wide half-plane separation and
  * exact active-edge containment of the resulting stroke support point authorize contact.
- * Other oblique normals remain unresolved; there is no polygonal outline approximation.
+ * Further derived-edge normal candidates can be certified when two square roots have
+ * independently verified exact dyadic representations. Uncertified cases remain unresolved;
+ * there is no polygonal outline approximation.
  *
  * Budgeted subdivision is intentionally bounded. Pure geometry only; no page clipping,
  * renderer certification, visible-element HIT, or finite DU tolerance policy.
@@ -220,6 +222,10 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
             return point(divide(subtract(multiply(dd, x), multiply(cc, y)), determinant),
                 divide(subtract(multiply(aa, y), multiply(bb, x)), determinant))
         }
+        // Preserve exact local vertices for candidate lines derived from the authenticated
+        // source. This is retained and charged in the one shared arithmetic arena.
+        retainRecord(192L + vertices.size.toLong() * 16L)
+        val localVertices = ArrayList<Point>(vertices.size)
         // A whole source made of straight segments is contained in the convex hull of
         // its vertices. If ALL vertices lie beyond an extreme stroke support line,
         // there cannot be any interior overlap. This prepass avoids expensive arc
@@ -230,6 +236,7 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
             verify(vertex.id == i && vertex.point.x.context === this &&
                 vertex.point.y.context === this, InvalidReason.GROUP_ASSOCIATION)
             val q = local(vertex.point)
+            localVertices.add(q)
             for (axis in 0 until 4) {
                 chargeIncidentLassoWork()
                 if (allBeyond[axis] && !beyond(q, axis)) allBeyond[axis] = false
@@ -318,13 +325,19 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
         val oblique = if (!hasAxialSupport && !witnessOdd) certifyRationalObliqueSupport(
             vertices, groups, toggles, ::local,
             center, rx, ry, stroke, zero, one) else null
+        // Generalize beyond the finite rational-normal table: candidate directions come
+        // from actual active source edges. All support equations and contact checks are
+        // verified exactly; floating-point is ONLY an untrusted square-root candidate.
+        val sourceNormal = if (!hasAxialSupport && !witnessOdd && oblique == null)
+            certifySourceNormalSupport(groups, toggles, localVertices,
+                center, rx, ry, stroke, zero) else null
 
         // Only unresolved geometry needs the bounded arc search. All graph associations
         // were checked in the first pass, so this second pass can stop on an exact
         // strict-overlap witness without weakening mutation or source-ownership checks.
         var boundaryOverlap = false
         var certifiedAllSeparated = true
-        if (!hasAxialSupport && !witnessOdd && oblique == null) {
+        if (!hasAxialSupport && !witnessOdd && oblique == null && sourceNormal == null) {
             for (i in groups.indices) {
                 if (!toggles[i]) continue
                 chargeIncidentLassoWork(2)
@@ -341,6 +354,7 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
             hasAxialSupport -> if (axialContact) Relation.BOUNDARY_ONLY_CONTACT else Relation.DISJOINT
             witnessOdd || boundaryOverlap -> Relation.INTERIOR_OVERLAP
             oblique != null -> oblique
+            sourceNormal != null -> sourceNormal
             certifiedAllSeparated -> Relation.DISJOINT
             else -> throw Unresolved(SelectionPredicateResult.Indeterminate(
                 SelectionNumericalReason.UNCERTIFIED_COMPARISON))
@@ -427,6 +441,104 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
                     }
                     return if (activeContact) Relation.BOUNDARY_ONLY_CONTACT else Relation.DISJOINT
                 }
+            }
+        }
+        return null
+    }
+
+    /**
+     * A square-root guess is NEVER a predicate: all proposed dyadic roots must square
+     * to the original exact rational. This can miss non-dyadic rational roots, in which
+     * case this optional certificate returns null and the existing search is used.
+     * No floating calculation can authorize INTERIOR_OVERLAP or DISJOINT.
+     */
+    private fun SelectionExactArithmetic.verifiedDyadicRootOrNull(
+        square: Rational,
+    ): Rational? {
+        chargeIncidentLassoWork(3)
+        if (sign(square) != Sign.POSITIVE) return null
+        val approximate = square.numerator.toDouble() / square.denominator.toDouble()
+        if (!approximate.isFinite() || approximate <= 0.0) return null
+        val candidate = kotlin.math.sqrt(approximate)
+        if (!candidate.isFinite() || candidate <= 0.0) return null
+        val exact = fromDouble(candidate)
+        return if (compare(multiply(exact, exact), square) == Sign.ZERO) exact else null
+    }
+
+    /**
+     * An active source edge supplies its own possible stroke support normal, rather than
+     * requiring membership in a table of angles. First prove that the entire source lies
+     * in one closed half-plane of that edge. Only then attempt the exact ellipse + disk
+     * support equation in that direction:
+     *   E = C + (rx^2 * nx, ry^2 * ny) / sqrt((rx*nx)^2 + (ry*ny)^2)
+     *   P = E + r * n / sqrt(nx^2 + ny^2).
+     * The two square roots are admitted ONLY when independently verified exact.
+     * All source vertices lying beyond n dot (X-P) >= 0 proves no interior overlap;
+     * active boundary containment of P distinguishes contact from disjointness.
+     * Bounded candidate count preserves budget for the fallback subdivision.
+     */
+    private fun SelectionExactArithmetic.certifySourceNormalSupport(
+        groups: List<SelectionLassoCoincidentGeometry.EdgeGroup>,
+        toggles: List<Boolean>, vertices: List<Point>,
+        center: Point, rx: Rational, ry: Rational, stroke: Rational,
+        zero: Rational,
+    ): Relation? {
+        chargeIncidentLassoWork()
+        verify(vertices.isNotEmpty() && toggles.size == groups.size,
+            InvalidReason.GROUP_ASSOCIATION)
+        val rxSquared = multiply(rx, rx)
+        val rySquared = multiply(ry, ry)
+        var considered = 0
+        for (i in groups.indices) {
+            chargeIncidentLassoWork()
+            if (!toggles[i]) continue
+            if (++considered > MAX_SOURCE_NORMAL_CANDIDATES) break
+            val group = groups[i]
+            val a = vertices[group.startVertexId]
+            val b = vertices[group.endVertexId]
+            val delta = vector(b, a)
+            val candidate = point(subtract(zero, delta.y), delta.x)
+            for (direction in 0 until 2) {
+                chargeIncidentLassoWork(3)
+                val n = if (direction == 0) candidate else point(
+                    subtract(zero, candidate.x), subtract(zero, candidate.y))
+                // Both the local edge and the source are exact straight-line geometry;
+                // checking all vertices suffices for entire-source half-plane containment.
+                var beyondSourceEdge = true
+                for (v in vertices) {
+                    chargeIncidentLassoWork()
+                    if (sign(dot(vector(v, a), n)) == Sign.NEGATIVE) {
+                        beyondSourceEdge = false
+                        break
+                    }
+                }
+                if (!beyondSourceEdge || sign(dot(vector(a, center), n)) != Sign.POSITIVE)
+                    continue
+                val nxrx = multiply(n.x, rx)
+                val nyry = multiply(n.y, ry)
+                val ellipseNormSquared = add(multiply(nxrx, nxrx), multiply(nyry, nyry))
+                val lineNormSquared = squared(n)
+                val ellipseNorm = verifiedDyadicRootOrNull(ellipseNormSquared) ?: continue
+                val lineNorm = verifiedDyadicRootOrNull(lineNormSquared) ?: continue
+                val ellipsePoint = point(
+                    add(center.x, divide(multiply(rxSquared, n.x), ellipseNorm)),
+                    add(center.y, divide(multiply(rySquared, n.y), ellipseNorm)))
+                val support = point(
+                    add(ellipsePoint.x, divide(multiply(stroke, n.x), lineNorm)),
+                    add(ellipsePoint.y, divide(multiply(stroke, n.y), lineNorm)))
+                // The candidate source edge must be the exact support line, not a
+                // parallel edge at a merely close, rounded, or unrelated offset.
+                if (sign(dot(vector(a, support), n)) != Sign.ZERO) continue
+                // A support line meets a strictly convex ellipse + disk in exactly
+                // one point. Check EVERY active group in case the point lies at a
+                // split junction on a different collinear source fragment.
+                val contact = groups.indices.any { j ->
+                    chargeIncidentLassoWork()
+                    val g = groups[j]
+                    toggles[j] && onSegment(support,
+                        vertices[g.startVertexId], vertices[g.endVertexId])
+                }
+                return if (contact) Relation.BOUNDARY_ONLY_CONTACT else Relation.DISJOINT
             }
         }
         return null
@@ -566,6 +678,7 @@ internal object SelectionLassoGeneralEllipseOutlineCertificates {
         return best
     }
 
+    private const val MAX_SOURCE_NORMAL_CANDIDATES = 16
     private const val MAX_ARC_DEPTH = 7
     private const val MAX_ARC_CELLS = 160
 }

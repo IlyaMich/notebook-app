@@ -230,17 +230,45 @@ class SelectionLassoGeneralEllipseOutlineCertificatesTest {
         }
     }
 
-    @Test fun UnsampledEightFifteenExactTangencyRemainsUnresolved() {
-        // A real nonaxial exact tangency at direction (8/17,15/17).
-        // The finite rational unit-normal table intentionally does NOT include it.
-        // Radii (5,2), stroke 1/2, support 8*x+15*y=117/2.
+    @Test fun PreviouslyUnsampledEightFifteenTangencyIsNowCertifiedFromTheSourceEdge() {
+        // (8,15) is absent from the finite oblique candidate table. Its exact source
+        // edge supplies the normal; ellipse and line norm squares are 2500 and 289.
         val lasso = listOf(p(2.625, 2.5), p(6.375, 0.5), p(9, 5))
         production(lasso).use { f ->
-            val result = Intersection.intersect(f.owner, f.region,
-                oval(-5, -2, 10, 4, 0.5), identity)
-            assertTrue("Uncertified exact oblique tangency must not be guessed: $result",
-                result is Intersection.Result.Unresolved)
-            assertEquals(0L, f.budget.used(SelectionQueryResource.TEMPORARY_BYTES))
+            assertRelation(f, oval(-5, -2, 10, 4, 0.5), touch)
+        }
+    }
+
+    @Test fun NovelSevenTwentyFourTangencyIsCertifiedWithoutAnAngleTableEntry() {
+        // Source line 7*x+24*y=173/2. For radii (10,1), n=(7,24),
+        // sqrt((10*7)^2 + (1*24)^2)=74 and ||n||=25, both exact.
+        // The support point lies strictly between (5.5,2) and (17.5,-1.5).
+        val lasso = listOf(p(5.5, 2), p(17.5, -1.5), p(20, 5))
+        production(lasso).use { f ->
+            assertRelation(f, oval(-10, -1, 20, 2, 0.5), touch)
+        }
+    }
+
+    @Test fun DerivedNormalCertificateSurvivesReflectionAndShear() {
+        val base = listOf(p(5.5, 2), p(17.5, -1.5), p(20, 5))
+        val reflected = base.map { p(30.0 - it.x, it.y) }
+        production(reflected).use { f ->
+            assertRelation(f, oval(-10, -1, 20, 2, 0.5), touch,
+                affine(-1.0, 0.0, 0.0, 1.0, 30.0, 0.0))
+        }
+        val sheared = base.map { p(it.x + 0.5 * it.y + 3.0, it.y) }
+        production(sheared).use { f ->
+            assertRelation(f, oval(-10, -1, 20, 2, 0.5), touch,
+                affine(1.0, 0.0, 0.5, 1.0, 3.0, 0.0))
+        }
+    }
+
+    @Test fun NovelSupportRequiresTheEntireSourceOnTheExteriorSide() {
+        // Same tangent edge, but third vertex crosses into the stroke's half-plane.
+        // Such a shape is not a boundary-only contact even though the edge is tangent.
+        val lasso = listOf(p(5.5, 2), p(17.5, -1.5), p(0, 0))
+        production(lasso).use { f ->
+            assertRelation(f, oval(-10, -1, 20, 2, 0.5), inside)
         }
     }
 
