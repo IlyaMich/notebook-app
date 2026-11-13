@@ -28,7 +28,7 @@ internal object SelectionLassoCapsuleIntersection {
     enum class Relation { INTERIOR_OVERLAP, BOUNDARY_ONLY_CONTACT, DISJOINT }
     enum class InvalidReason {
         OWNER_CLOSED, OWNER_MISMATCH, UNAUTHENTICATED_REGION, SOURCE_ASSOCIATION,
-        INVALID_CAPSULE, INVALID_AFFINE, FACE_MAPPING, GROUP_ASSOCIATION, COUNT_OVERFLOW,
+        INVALID_CAPSULE, INVALID_OUTLINE, INVALID_AFFINE, FACE_MAPPING, GROUP_ASSOCIATION, COUNT_OVERFLOW,
     }
     sealed interface Result {
         data class Ready(val value: Borrowed) : Result
@@ -57,16 +57,93 @@ internal object SelectionLassoCapsuleIntersection {
         transform: CanonicalElementAffine, evidence: Relation,
     ) : Borrowed(owner, source, primitive, transform, evidence)
 
+    /** Completed union of four local-radius capsules, one for each exact frame side. */
+    sealed interface OutlineResult {
+        data class Ready(val value: OutlineBorrowed) : OutlineResult
+        data class InvalidInput(val reason: InvalidReason) : OutlineResult
+        data class Unresolved(val cause: SelectionPredicateResult<Nothing>) : OutlineResult
+    }
+    open class OutlineBorrowed internal constructor(
+        private val owner: Prepared,
+        private val source: Filled.Borrowed,
+        private val primitive: SelectionPaintGeometry.Primitive.FrameOutline,
+        private val transform: CanonicalElementAffine,
+        private val evidence: Relation,
+    ) {
+        val region: Filled.Borrowed get() { owner.segments; return source }
+        val outline: SelectionPaintGeometry.Primitive.FrameOutline get() { owner.segments; return primitive }
+        val affine: CanonicalElementAffine get() { owner.segments; return transform }
+        val relation: Relation get() { owner.segments; return evidence }
+        internal fun isOwnedBy(prepared: Prepared): Boolean = owner === prepared
+        internal fun isAuthenticatedFor(prepared: Prepared): Boolean =
+            owner === prepared && this is CompletedOutline
+    }
+    private class CompletedOutline(
+        owner: Prepared, source: Filled.Borrowed,
+        primitive: SelectionPaintGeometry.Primitive.FrameOutline,
+        transform: CanonicalElementAffine, evidence: Relation,
+    ) : OutlineBorrowed(owner, source, primitive, transform, evidence)
+
     private class Invalid(val reason: InvalidReason) : RuntimeException()
     private class Unresolved(val outcome: SelectionPredicateResult<Nothing>) : RuntimeException()
     private fun verify(valid: Boolean, reason: InvalidReason) {
         if (!valid) throw Invalid(reason)
     }
-    private fun <T> known(result: SelectionPredicateResult<T>): T = when (result) {
+    private fun <T> known(
+        result: SelectionPredicateResult<T>,
+        malformed: InvalidReason = InvalidReason.INVALID_CAPSULE,
+    ): T = when (result) {
         is SelectionPredicateResult.Known -> result.value
         is SelectionPredicateResult.WorkloadExceeded -> throw Unresolved(result)
         is SelectionPredicateResult.Indeterminate -> throw Unresolved(result)
-        SelectionPredicateResult.InvalidCoordinates -> throw Invalid(InvalidReason.INVALID_CAPSULE)
+        SelectionPredicateResult.InvalidCoordinates -> throw Invalid(malformed)
+    }
+
+    private data class Sources(
+        val parity: Parity.Borrowed,
+        val faces: Faces.Borrowed,
+        val cycles: SelectionLassoSuccessorCycles.Borrowed,
+        val adjacency: SelectionLassoIncidentAdjacency.Borrowed,
+    )
+
+    /** Authentication and ownership precede source access with arithmetic and cancellation. */
+    private fun sources(prepared: Prepared, region: Filled.Borrowed): Sources {
+        val parity: Parity.Borrowed
+        val faces: Faces.Borrowed
+        val approach: SelectionLassoContactApproachEvidence.Borrowed
+        val components: SelectionLassoGraphComponents.Borrowed
+        val cycles: SelectionLassoSuccessorCycles.Borrowed
+        val adjacency: SelectionLassoIncidentAdjacency.Borrowed
+        try {
+            prepared.segments; region.oddFaceIds
+            parity = region.parity
+            parity.faceParities; parity.edgeGroupToggles; parity.oddFaceIds
+            faces = parity.faces
+            faces.faces; faces.counts; faces.walkToFace
+            approach = faces.approach
+            components = approach.components
+            cycles = components.cycles
+            adjacency = cycles.adjacency
+            adjacency.edgeGroups; adjacency.vertices; adjacency.halfEdges
+            cycles.halfEdgeToWalk
+        } catch (_: IllegalStateException) { throw Invalid(InvalidReason.OWNER_CLOSED) }
+        val rays = approach.contacts
+        val admission = components.admission
+        verify(region.isOwnedBy(prepared) && parity.isOwnedBy(prepared) &&
+            faces.isOwnedBy(prepared) && approach.isOwnedBy(prepared) &&
+            rays.isOwnedBy(prepared) && rays.exterior.isOwnedBy(prepared) &&
+            components.isOwnedBy(prepared) && admission.isOwnedBy(prepared) &&
+            cycles.isOwnedBy(prepared) && cycles.permutation.isOwnedBy(prepared) &&
+            adjacency.isOwnedBy(prepared), InvalidReason.OWNER_MISMATCH)
+        verify(region.isAuthenticatedFor(prepared) && parity.isAuthenticatedFor(prepared) &&
+            faces.isAuthenticatedFor(prepared) && approach.isAuthenticatedFor(prepared) &&
+            rays.isAuthenticatedFor(prepared) && admission.isAuthenticatedFor(prepared),
+            InvalidReason.UNAUTHENTICATED_REGION)
+        verify(region.parity === parity && parity.faces === faces &&
+            approach.components === components && rays.components === components &&
+            admission.cycles === cycles && cycles.adjacency === adjacency,
+            InvalidReason.SOURCE_ASSOCIATION)
+        return Sources(parity, faces, cycles, adjacency)
     }
 
     fun intersect(
@@ -75,41 +152,7 @@ internal object SelectionLassoCapsuleIntersection {
     ): Result {
         var success = false
         try {
-            val parity: Parity.Borrowed
-            val faces: Faces.Borrowed
-            val approach: SelectionLassoContactApproachEvidence.Borrowed
-            val components: SelectionLassoGraphComponents.Borrowed
-            val cycles: SelectionLassoSuccessorCycles.Borrowed
-            val adjacency: SelectionLassoIncidentAdjacency.Borrowed
-            try {
-                prepared.segments; region.oddFaceIds
-                parity = region.parity
-                parity.faceParities; parity.edgeGroupToggles; parity.oddFaceIds
-                faces = parity.faces
-                faces.faces; faces.counts; faces.walkToFace
-                approach = faces.approach
-                components = approach.components
-                cycles = components.cycles
-                adjacency = cycles.adjacency
-                adjacency.edgeGroups; adjacency.vertices; adjacency.halfEdges
-                cycles.halfEdgeToWalk
-            } catch (_: IllegalStateException) { throw Invalid(InvalidReason.OWNER_CLOSED) }
-            val rays = approach.contacts
-            val admission = components.admission
-            verify(region.isOwnedBy(prepared) && parity.isOwnedBy(prepared) &&
-                faces.isOwnedBy(prepared) && approach.isOwnedBy(prepared) &&
-                rays.isOwnedBy(prepared) && rays.exterior.isOwnedBy(prepared) &&
-                components.isOwnedBy(prepared) && admission.isOwnedBy(prepared) &&
-                cycles.isOwnedBy(prepared) && cycles.permutation.isOwnedBy(prepared) &&
-                adjacency.isOwnedBy(prepared), InvalidReason.OWNER_MISMATCH)
-            verify(region.isAuthenticatedFor(prepared) && parity.isAuthenticatedFor(prepared) &&
-                faces.isAuthenticatedFor(prepared) && approach.isAuthenticatedFor(prepared) &&
-                rays.isAuthenticatedFor(prepared) && admission.isAuthenticatedFor(prepared),
-                InvalidReason.UNAUTHENTICATED_REGION)
-            verify(region.parity === parity && parity.faces === faces &&
-                approach.components === components && rays.components === components &&
-                admission.cycles === cycles && cycles.adjacency === adjacency,
-                InvalidReason.SOURCE_ASSOCIATION)
+            val s = sources(prepared, region)
             verify(capsule.start.x.isFinite() && capsule.start.y.isFinite() &&
                 capsule.end.x.isFinite() && capsule.end.y.isFinite() &&
                 capsule.radius.isFinite() && capsule.radius > 0.0,
@@ -118,8 +161,7 @@ internal object SelectionLassoCapsuleIntersection {
             verify(coefficients.size == 6 && coefficients.all(Double::isFinite),
                 InvalidReason.INVALID_AFFINE)
             val result = known(prepared.exact {
-                construct(prepared, region, parity, faces, cycles, adjacency,
-                    capsule, affine, coefficients)
+                constructCapsule(prepared, region, s, capsule, affine, coefficients)
             })
             success = true
             return Result.Ready(result)
@@ -134,13 +176,88 @@ internal object SelectionLassoCapsuleIntersection {
         }
     }
 
-    private fun SelectionExactArithmetic.construct(
-        owner: Prepared, region: Filled.Borrowed, parity: Parity.Borrowed,
-        faces: Faces.Borrowed, cycles: SelectionLassoSuccessorCycles.Borrowed,
-        adjacency: SelectionLassoIncidentAdjacency.Borrowed,
+    /** Four local centerline sides share one exact attempt and one final publication gate. */
+    fun intersectOutline(
+        prepared: Prepared, region: Filled.Borrowed,
+        outline: SelectionPaintGeometry.Primitive.FrameOutline, affine: CanonicalElementAffine,
+    ): OutlineResult {
+        var success = false
+        try {
+            val s = sources(prepared, region)
+            val f = outline.frame
+            verify(f.x.isFinite() && f.y.isFinite() && f.width.isFinite() &&
+                f.height.isFinite() && f.width > 0.0 && f.height > 0.0 &&
+                outline.radius.isFinite() && outline.radius > 0.0,
+                InvalidReason.INVALID_OUTLINE)
+            val coefficients = affine.coefficients()
+            verify(coefficients.size == 6 && coefficients.all(Double::isFinite),
+                InvalidReason.INVALID_AFFINE)
+            val result = known(prepared.exact {
+                constructOutline(prepared, region, s, outline, affine, coefficients)
+            }, InvalidReason.INVALID_OUTLINE)
+            success = true
+            return OutlineResult.Ready(result)
+        } catch (invalid: Invalid) {
+            return OutlineResult.InvalidInput(invalid.reason)
+        } catch (unresolved: Unresolved) {
+            return OutlineResult.Unresolved(unresolved.outcome)
+        } catch (_: ArithmeticException) {
+            return OutlineResult.InvalidInput(InvalidReason.COUNT_OVERFLOW)
+        } finally {
+            if (!success) prepared.close()
+        }
+    }
+
+    private fun SelectionExactArithmetic.constructCapsule(
+        owner: Prepared, region: Filled.Borrowed, s: Sources,
         capsule: SelectionPaintGeometry.Primitive.Capsule,
         affine: CanonicalElementAffine, c: List<Double>,
     ): Borrowed {
+        retainRecord(128) // singleton centerline pair, wrapper and output references
+        val segments = listOf(point(capsule.start) to point(capsule.end))
+        val relation = classifyUnion(region, s, segments, capsule.radius, c)
+        retainRecord(256)
+        chargeIncidentLassoWork() // final cancellation and publication checkpoint
+        return Completed(owner, region, capsule, affine, relation)
+    }
+
+    private fun SelectionExactArithmetic.constructOutline(
+        owner: Prepared, region: Filled.Borrowed, s: Sources,
+        outline: SelectionPaintGeometry.Primitive.FrameOutline,
+        affine: CanonicalElementAffine, c: List<Double>,
+    ): OutlineBorrowed {
+        // Use exact binary-rational sums: never round x + width or y + height to Double.
+        retainRecord(768) // four corners, four ordered side pairs, retained output references
+        val f = outline.frame
+        val x = fromDouble(f.x); val y = fromDouble(f.y)
+        val right = add(x, fromDouble(f.width))
+        val bottom = add(y, fromDouble(f.height))
+        val corners = listOf(point(x, y), point(right, y),
+            point(right, bottom), point(x, bottom))
+        val segments = ArrayList<Pair<Point, Point>>(4)
+        for (i in corners.indices) {
+            chargeIncidentLassoWork(2)
+            segments.add(corners[i] to corners[(i + 1) % corners.size])
+        }
+        val relation = classifyUnion(region, s, segments, outline.radius, c)
+        retainRecord(256)
+        chargeIncidentLassoWork() // final cancellation and publication checkpoint
+        return CompletedOutline(owner, region, outline, affine, relation)
+    }
+
+    /** One shared certified scan of the connected union of local round-stroke capsules.
+     * A boundary entering ANY open capsule proves open filled overlap. Otherwise the whole
+     * connected open union has constant parity, read at its first local endpoint. The four
+     * frame sides are checked with exact endpoints inside the ORIGINAL owner arena.
+     */
+    private fun SelectionExactArithmetic.classifyUnion(
+        region: Filled.Borrowed, s: Sources,
+        localSegments: List<Pair<Point, Point>>, radiusDu: Double, c: List<Double>,
+    ): Relation {
+        val parity = s.parity; val faces = s.faces; val cycles = s.cycles
+        val adjacency = s.adjacency
+        verify(localSegments.isNotEmpty() && localSegments.size <= 4,
+            InvalidReason.INVALID_CAPSULE)
         chargeIncidentLassoWork()
         val groups = adjacency.edgeGroups
         val vertices = adjacency.vertices
@@ -177,9 +294,7 @@ internal object SelectionLassoCapsuleIntersection {
         val shear = fromDouble(c[2]); val tx = fromDouble(c[4]); val ty = fromDouble(c[5])
         val det = subtract(multiply(a, d), multiply(b, shear))
         verify(sign(det) != Sign.ZERO, InvalidReason.INVALID_AFFINE)
-        val localStart = point(capsule.start)
-        val localEnd = point(capsule.end)
-        val radius = fromDouble(capsule.radius)
+        val radius = fromDouble(radiusDu)
         val radiusSquared = multiply(radius, radius)
         val zero = rational(0); val one = rational(1)
         fun page(localPoint: Point): Point {
@@ -193,7 +308,7 @@ internal object SelectionLassoCapsuleIntersection {
             return point(divide(subtract(multiply(d, x), multiply(shear, y)), det),
                 divide(subtract(multiply(a, y), multiply(b, x)), det))
         }
-        val witness = page(localStart)
+        val witness = page(localSegments.first().first)
         var boundaryEntersOpenCapsule = false
         var boundaryTouchesClosedCapsule = false
         var witnessOdd = false
@@ -235,12 +350,18 @@ internal object SelectionLassoCapsuleIntersection {
                 (faceParity[faceA].isOdd xor faceParity[faceB].isOdd) == toggles[i],
                 InvalidReason.FACE_MAPPING)
             if (!toggles[i]) continue // Even retraces are not fill boundaries.
-            val distance = squaredSegmentDistance(local(group.start), local(group.end),
-                localStart, localEnd, zero, one)
-            when (compare(distance, radiusSquared)) {
-                Sign.NEGATIVE -> { boundaryEntersOpenCapsule = true; boundaryTouchesClosedCapsule = true }
-                Sign.ZERO -> boundaryTouchesClosedCapsule = true
-                Sign.POSITIVE -> Unit
+            val localA = local(group.start); val localB = local(group.end)
+            for ((start, end) in localSegments) {
+                chargeIncidentLassoWork(2)
+                val distance = squaredSegmentDistance(localA, localB, start, end, zero, one)
+                when (compare(distance, radiusSquared)) {
+                    Sign.NEGATIVE -> {
+                        boundaryEntersOpenCapsule = true
+                        boundaryTouchesClosedCapsule = true
+                    }
+                    Sign.ZERO -> boundaryTouchesClosedCapsule = true
+                    Sign.POSITIVE -> Unit
+                }
             }
             // Exact half-open horizontal ray from the centerline witness.
             val startY = compare(group.start.y, witness.y)
@@ -260,9 +381,7 @@ internal object SelectionLassoCapsuleIntersection {
             boundaryTouchesClosedCapsule -> Relation.BOUNDARY_ONLY_CONTACT
             else -> Relation.DISJOINT
         }
-        retainRecord(256)
-        chargeIncidentLassoWork() // final cancellation and resource checkpoint
-        return Completed(owner, region, capsule, affine, relation)
+        return relation
     }
 
     private fun SelectionExactArithmetic.squared(a: Point): Rational =
