@@ -13,6 +13,8 @@ import com.notebook.app.data.local.entity.AssetEntity
 import com.notebook.app.data.local.entity.PageAssetReferenceEntity
 import com.notebook.app.data.local.entity.ElementAssetReferenceEntity
 import com.notebook.app.data.local.entity.AssetReferenceIndexStateEntity
+import com.notebook.app.data.local.entity.ExportOperationEntity
+import com.notebook.app.data.local.entity.ExportAssetHoldEntity
 import com.notebook.app.data.local.entity.ElementEntity
 import com.notebook.app.data.local.entity.PageEntity
 import com.notebook.app.data.local.entity.FolderEntity
@@ -31,8 +33,9 @@ import com.notebook.app.data.local.entity.NoteEntity
         PageEntity::class, ElementEntity::class, AssetEntity::class,
         PageAssetReferenceEntity::class, ElementAssetReferenceEntity::class,
         AssetReferenceIndexStateEntity::class,
+        ExportOperationEntity::class, ExportAssetHoldEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
