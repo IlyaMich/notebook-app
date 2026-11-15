@@ -85,4 +85,11 @@ interface AssetOwnershipDao {
            FROM asset_reference_index_state"""
     )
     suspend fun readFailClosedGateStatus(): String
+
+    /** I5-A5: bounded READ-ONLY projection scans inside caller's Room transaction. */
+    @Query("SELECT * FROM page_asset_references ORDER BY page_id ASC LIMIT :limit")
+    suspend fun listPageReferencesForDiagnostic(limit: Int): List<PageAssetReferenceEntity>
+
+    @Query("SELECT * FROM element_asset_references ORDER BY element_id ASC LIMIT :limit")
+    suspend fun listElementReferencesForDiagnostic(limit: Int): List<ElementAssetReferenceEntity>
 }
