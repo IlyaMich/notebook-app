@@ -14,9 +14,21 @@ import kotlinx.serialization.json.*
 
 /** Read-only metadata/content capture. Never opens originals or acquires a lease. */
 internal class ExportSourceSnapshotReader(private val db: AppDatabase) {
+    /** Public capture retains its existing single Room transaction boundary. */
     suspend fun capture(request: SnapshotRequest): SnapshotResult = try {
-        // Exactly one coordinator, even for rejected requests; no nested repository calls.
-        db.withTransaction {
+        db.withTransaction { captureInTransaction(request) }
+    } catch (cancel: CancellationException) {
+        throw cancel
+    } catch (_: SQLException) {
+        currentCoroutineContext().ensureActive()
+        SnapshotResult.Rejected(SnapshotRejection.DATABASE_READ_FAILED)
+    }
+
+    /**
+     * The caller MUST already be inside the one owning Room transaction.
+     * Do not call directly without a transaction. This returns metadata only.
+     */
+    internal suspend fun captureInTransaction(request: SnapshotRequest): SnapshotResult = try {
             currentCoroutineContext().ensureActive()
             val limits = request.limits
             checkRequest(request)
@@ -137,7 +149,6 @@ internal class ExportSourceSnapshotReader(private val db: AppDatabase) {
                     note.updatedAtMillis, note.lastOpenedAtMillis, note.revision),
                 frozen(pages), frozen(owners), frozen(assets.values), jsonBytes, sourceBytes,
             )
-        }
     } catch (cancel: CancellationException) {
         throw cancel
     } catch (failure: Rejection) {
