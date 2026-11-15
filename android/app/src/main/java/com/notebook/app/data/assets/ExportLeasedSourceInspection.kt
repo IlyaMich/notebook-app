@@ -32,7 +32,8 @@ internal data class ExportVerifiedSourceObservation(
 internal class ExportLeasedSourceByteInspector(
     private val privateFilesDir: File,
     private val assetDao: AssetDao,
-) {
+) : ExportSingleImageByteBorrower {
+    /** Reuses the same source verification routine as the borrowed single-image path. */
     suspend fun inspectUnderHeldLease(
         plan: ExportCopyAdmissionPlan,
     ): ExportVerifiedSourceObservation = withContext(Dispatchers.IO) {
@@ -44,65 +45,108 @@ internal class ExportLeasedSourceByteInspector(
             if (expected.encodedBytes > plan.totalEncodedBytes - total) {
                 throw IOException("Export source total exceeds admitted budget")
             }
-            val before = assetDao.findById(expected.id)
-                ?: throw IOException("Admitted source is no longer registered")
-            if (before.id != expected.id || before.sha256 != expected.sha256 ||
-                before.mimeType != expected.mimeType || before.byteSize != expected.encodedBytes ||
-                before.relativePath != expected.relativePath || before.state != "finalized"
-            ) throw IOException("Registered source metadata changed after capture")
-
-            val path = checkedPath(expected)
-            val priorIdentity = Files.readAttributes(
-                path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS,
-            )
-            if (!priorIdentity.isRegularFile || priorIdentity.size() != expected.encodedBytes) {
-                throw IOException("Invalid original file identity or byte size")
-            }
-            val bytes = ByteArray(expected.encodedBytes.toInt())
-            try {
-                FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
-                    if (channel.size() != expected.encodedBytes) {
-                        throw IOException("Original length changed before reading")
-                    }
-                    val buffer = ByteBuffer.wrap(bytes)
-                    while (buffer.hasRemaining()) {
-                        currentCoroutineContext().ensureActive()
-                        if (channel.read(buffer) <= 0) {
-                            throw IOException("Original read truncated or stalled")
-                        }
-                    }
-                    if (channel.size() != expected.encodedBytes) {
-                        throw IOException("Original length changed during reading")
-                    }
-                }
-                val info = BoundedImageBytesInspector.inspect(
-                    ExpectedEncodedImage(expected.id, expected.mimeType,
-                        expected.sha256, expected.encodedBytes), bytes,
-                )
-                currentCoroutineContext().ensureActive()
-                val afterIdentity = Files.readAttributes(
-                    path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS,
-                )
-                if (!afterIdentity.isRegularFile ||
-                    afterIdentity.size() != expected.encodedBytes ||
-                    (priorIdentity.fileKey() != null &&
-                        priorIdentity.fileKey() != afterIdentity.fileKey())
-                ) throw IOException("Original path identity changed during inspection")
-                val after = assetDao.findById(expected.id)
-                    ?: throw IOException("Registered source disappeared during inspection")
-                if (after != before) throw IOException("Registered source changed during inspection")
-                currentCoroutineContext().ensureActive()
-                observed.add(info)
-                total += expected.encodedBytes
-            } finally {
-                bytes.fill(0)
-            }
+            observed.add(withCheckedSourceBytes(expected) { info, _ -> info })
+            total += expected.encodedBytes
         }
         currentCoroutineContext().ensureActive()
         if (total != plan.totalEncodedBytes) {
             throw IOException("Verified source total differs from admitted total")
         }
         ExportVerifiedSourceObservation(Collections.unmodifiableList(ArrayList(observed)), total)
+    }
+
+    /**
+     * Synthetic integration seam for ONE admitted image only. The caller ALREADY holds
+     * the non-reentrant publication lease. The borrowed array must never escape [action].
+     * No export receipt, staging authority, or GC permission is returned by this method.
+     */
+    override suspend fun <T> withVerifiedSingleImageBytesUnderHeldLease(
+        plan: ExportCopyAdmissionPlan,
+        action: suspend (ExpectedEncodedImage, ByteArray) -> T,
+    ): T = withContext(Dispatchers.IO) {
+        if (plan.images.size != 1 || plan.images[0].encodedBytes != plan.totalEncodedBytes) {
+            throw IOException("Synthetic source borrowing requires exactly one admitted image")
+        }
+        val expected = plan.images.single()
+        withCheckedSourceBytes(expected) { info, bytes ->
+            action(ExpectedEncodedImage(info.assetId, info.mimeType, info.sha256, info.encodedBytes), bytes)
+        }
+    }
+
+    private suspend fun <T> withCheckedSourceBytes(
+        expected: SnapshotAssetMetadata,
+        action: suspend (VerifiedDecodedImageInfo, ByteArray) -> T,
+    ): T {
+        currentCoroutineContext().ensureActive()
+        BoundedImageDecodePolicy.requireEncoded(expected.mimeType, expected.encodedBytes)
+        val before = assetDao.findById(expected.id)
+            ?: throw IOException("Admitted source is no longer registered")
+        if (before.id != expected.id || before.sha256 != expected.sha256 ||
+            before.mimeType != expected.mimeType || before.byteSize != expected.encodedBytes ||
+            before.relativePath != expected.relativePath || before.state != "finalized"
+        ) throw IOException("Registered source metadata changed after capture")
+
+        val path = checkedPath(expected)
+        val priorIdentity = Files.readAttributes(
+            path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS,
+        )
+        if (!priorIdentity.isRegularFile || priorIdentity.size() != expected.encodedBytes) {
+            throw IOException("Invalid original file identity or byte size")
+        }
+        val bytes = ByteArray(expected.encodedBytes.toInt())
+        try {
+            FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
+                if (channel.size() != expected.encodedBytes) {
+                    throw IOException("Original length changed before reading")
+                }
+                val buffer = ByteBuffer.wrap(bytes)
+                while (buffer.hasRemaining()) {
+                    currentCoroutineContext().ensureActive()
+                    if (channel.read(buffer) <= 0) {
+                        throw IOException("Original read truncated or stalled")
+                    }
+                }
+                if (channel.size() != expected.encodedBytes) {
+                    throw IOException("Original length changed during reading")
+                }
+            }
+            val info = BoundedImageBytesInspector.inspect(
+                ExpectedEncodedImage(expected.id, expected.mimeType,
+                    expected.sha256, expected.encodedBytes), bytes,
+            )
+            currentCoroutineContext().ensureActive()
+            verifyStillCurrent(path, priorIdentity, before, expected.id, expected.encodedBytes)
+            val value = action(info, bytes)
+            currentCoroutineContext().ensureActive()
+            // The borrower must not modify the exclusively borrowed byte buffer.
+            // Recheck it before returning any successful observation.
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            if (digest != expected.sha256) throw IOException("Borrowed source bytes changed")
+            verifyStillCurrent(path, priorIdentity, before, expected.id, expected.encodedBytes)
+            currentCoroutineContext().ensureActive()
+            return value
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    private suspend fun verifyStillCurrent(
+        path: Path,
+        initialIdentity: BasicFileAttributes,
+        before: com.notebook.app.data.local.entity.AssetEntity,
+        assetId: String,
+        expectedBytes: Long,
+    ) {
+        val now = Files.readAttributes(
+            path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS,
+        )
+        if (!now.isRegularFile || now.size() != expectedBytes ||
+            (initialIdentity.fileKey() != null && initialIdentity.fileKey() != now.fileKey())
+        ) throw IOException("Original path identity changed during inspection")
+        val registered = assetDao.findById(assetId)
+            ?: throw IOException("Registered source disappeared during inspection")
+        if (registered != before) throw IOException("Registered source changed during inspection")
     }
 
     private fun checkedPath(expected: SnapshotAssetMetadata): Path {
