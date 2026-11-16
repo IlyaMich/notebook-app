@@ -4,6 +4,7 @@ import androidx.room.Database
 import androidx.room.RoomDatabase
 import com.notebook.app.data.local.dao.AssetDao
 import com.notebook.app.data.local.dao.AssetOwnershipDao
+import com.notebook.app.data.local.dao.ExportHoldAdmissionDao
 import com.notebook.app.data.local.dao.ElementDao
 import com.notebook.app.data.local.dao.PageDao
 import com.notebook.app.data.local.dao.FolderDao
@@ -13,6 +14,8 @@ import com.notebook.app.data.local.entity.AssetEntity
 import com.notebook.app.data.local.entity.PageAssetReferenceEntity
 import com.notebook.app.data.local.entity.ElementAssetReferenceEntity
 import com.notebook.app.data.local.entity.AssetReferenceIndexStateEntity
+import com.notebook.app.data.local.entity.ExportOperationEntity
+import com.notebook.app.data.local.entity.ExportAssetHoldEntity
 import com.notebook.app.data.local.entity.ElementEntity
 import com.notebook.app.data.local.entity.PageEntity
 import com.notebook.app.data.local.entity.FolderEntity
@@ -31,8 +34,9 @@ import com.notebook.app.data.local.entity.NoteEntity
         PageEntity::class, ElementEntity::class, AssetEntity::class,
         PageAssetReferenceEntity::class, ElementAssetReferenceEntity::class,
         AssetReferenceIndexStateEntity::class,
+        ExportOperationEntity::class, ExportAssetHoldEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -43,4 +47,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun elementDao(): ElementDao
     abstract fun assetDao(): AssetDao
     abstract fun assetOwnershipDao(): AssetOwnershipDao
+    abstract fun exportHoldAdmissionDao(): ExportHoldAdmissionDao
 }

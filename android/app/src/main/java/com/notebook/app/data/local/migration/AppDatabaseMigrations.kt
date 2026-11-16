@@ -2,6 +2,7 @@ package com.notebook.app.data.local.migration
 
 import androidx.room.migration.Migration
 import com.notebook.app.data.local.AssetReferenceIndexGuards
+import com.notebook.app.data.local.ExportHoldSchemaGuards
 import androidx.sqlite.db.SupportSQLiteDatabase
 import java.util.UUID
 
@@ -133,6 +134,42 @@ internal object AppDatabaseMigrations {
 
             // Empty tables do NOT imply that historical assets are unowned.
             AssetReferenceIndexGuards.initializeEmptyIndex(db)
+        }
+    }
+
+    /**
+     * STO-08 I5-B6A: ADDITIVE export hold storage only. No backfill, writers,
+     * receipt, release, GC or changes to the asset reference index gate.
+     * The delete/update triggers deliberately fail closed for this checkpoint.
+     */
+    val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `export_operations` (
+                    `operation_id` TEXT NOT NULL,
+                    `note_id` TEXT NOT NULL,
+                    `note_revision` INTEGER NOT NULL,
+                    `state` TEXT NOT NULL,
+                    `created_at_ms` INTEGER NOT NULL,
+                    `updated_at_ms` INTEGER NOT NULL,
+                    `protocol_version` INTEGER NOT NULL,
+                    PRIMARY KEY(`operation_id`)
+                )""".trimIndent()
+            )
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `export_asset_holds` (
+                    `operation_id` TEXT NOT NULL,
+                    `asset_id` TEXT NOT NULL,
+                    PRIMARY KEY(`operation_id`, `asset_id`),
+                    FOREIGN KEY(`operation_id`) REFERENCES `export_operations`(`operation_id`) ON UPDATE RESTRICT ON DELETE RESTRICT,
+                    FOREIGN KEY(`asset_id`) REFERENCES `assets`(`id`) ON UPDATE RESTRICT ON DELETE RESTRICT
+                )""".trimIndent()
+            )
+            db.execSQL(
+                """CREATE INDEX IF NOT EXISTS `ix_export_asset_holds_asset`
+                   ON `export_asset_holds` (`asset_id`)""".trimIndent()
+            )
+            ExportHoldSchemaGuards.install(db)
         }
     }
 }

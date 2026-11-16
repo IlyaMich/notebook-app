@@ -1,18 +1,15 @@
 package com.notebook.app.data.assets
 
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import com.notebook.app.data.local.dao.AssetDao
 import java.io.File
-import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /**
- * C2C-3B-I2 result: observed decoded dimensions and verified source identity only.
- * NOT a media-validity certificate or permission to insert an image element.
+ * Observed decoded dimensions and verified supplied bytes only.
+ * NOT a media-origin certificate, protected export receipt, or ownership authorization.
  */
 internal data class VerifiedDecodedImageInfo(
     val assetId: String,
@@ -25,15 +22,11 @@ internal data class VerifiedDecodedImageInfo(
 )
 
 /**
- * C2C-3B-I2: actual full-resolution Android decode from the I1-verified byte array.
- *
- * This standalone inspector obtains the publication lease through the I1 reader.
- * Do NOT invoke it from inside an already-held acquisition lease: the OS lock is
- * non-reentrant. C2C-3C will require a separately reviewed, lease-aware integration.
- * No Bitmap, byte array, file handle, or mutable path escapes this method.
- *
- * SECURITY GATE: BitmapFactory does NOT promise strict rejection of every malformed
- * PNG/JPEG. I3 structural/adversarial validation must pass before writer integration.
+ * Standalone registered-image inspector. Obtains the single publication lease through
+ * RegisteredFinalizedImageBytesReader; do NOT call from an already-held outer lease.
+ * Future export copying calls BoundedImageBytesInspector directly with independently
+ * bound, exact destination bytes while its coordinator already holds the outer lease.
+ * No raw byte array, Bitmap, open file or mutable path escapes inspection.
  */
 internal class RegisteredFinalizedImageDecoder(
     privateFilesDir: File,
@@ -45,10 +38,9 @@ internal class RegisteredFinalizedImageDecoder(
         withInspectedAssetLease(assetId) { it }
 
     /**
-     * C2C-3C-I1: retain the existing acquisition lease until [action] completes.
-     * The callback receives verified metadata only, never raw bytes or a bitmap.
-     * Do not reacquire the non-reentrant lease or invoke an asset publisher in [action].
-     * This method does NOT authorize an attachment or change ownership state.
+     * Preserve the existing lease through the entire suspending callback. The verified
+     * bytes reader clears the owned temporary buffer after callback completion/failure.
+     * This callback must not reacquire the non-reentrant lease or call an asset publisher.
      */
     suspend fun <T> withInspectedAssetLease(
         assetId: String,
@@ -56,91 +48,15 @@ internal class RegisteredFinalizedImageDecoder(
     ): T = withContext(Dispatchers.IO) {
         source.withVerifiedBytes(assetId) { snapshot, bytes ->
             currentCoroutineContext().ensureActive()
-            BoundedImageDecodePolicy.requireEncoded(snapshot.mimeType, bytes.size.toLong())
-            // I3 structural envelope checks run on the same digest-verified bytes
-            // that BitmapFactory will decode. In particular, do not trust a
-            // permissive native decoder to enforce PNG IEND / JPEG EOI or EOF.
-            StrictEncodedImageStructure.validate(snapshot.mimeType, bytes)
-            val inspectionContext = currentCoroutineContext()
-            when (snapshot.mimeType) {
-                "image/png" -> StrictPngInflateValidation.validate(bytes) {
-                    inspectionContext.ensureActive()
-                }
-                "image/jpeg" -> StrictBaselineJpegEntropy.validate(bytes) {
-                    inspectionContext.ensureActive()
-                }
-            }
-            currentCoroutineContext().ensureActive()
-
-            val boundsOptions = BitmapFactory.Options().apply {
-                inJustDecodeBounds = true
-                inScaled = false
-            }
-            // Bounds-only should never return an allocated pixel buffer. If it does,
-            // release it and reject rather than silently accepting unexpected behavior.
-            val unexpectedBoundsBitmap = BitmapFactory.decodeByteArray(
-                bytes, 0, bytes.size, boundsOptions,
-            )
-            if (unexpectedBoundsBitmap != null) {
-                unexpectedBoundsBitmap.recycle()
-                throw IOException("Bounds-only image pass unexpectedly allocated a bitmap")
-            }
-            if (boundsOptions.outMimeType != snapshot.mimeType) {
-                throw IOException("Decoder MIME differs from the registered image MIME")
-            }
-            val budget = BoundedImageDecodePolicy.requireIntrinsicDimensions(
-                boundsOptions.outWidth, boundsOptions.outHeight,
-            )
-            currentCoroutineContext().ensureActive()
-
-            val decodeOptions = BitmapFactory.Options().apply {
-                inJustDecodeBounds = false
-                inSampleSize = 1
-                inScaled = false
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-                inMutable = false
-                inBitmap = null
-            }
-            var bitmap: Bitmap? = null
-            val info = try {
-                bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions)
-                    ?: throw IOException("Full image decode failed")
-                // Full decode is synchronous and cannot be assumed to stop mid-call.
-                // Cancellation is checked immediately once native decoding returns.
-                currentCoroutineContext().ensureActive()
-                if (bitmap.width != budget.width || bitmap.height != budget.height ||
-                    decodeOptions.outWidth != budget.width ||
-                    decodeOptions.outHeight != budget.height
-                ) {
-                    throw IOException("Decoded bitmap dimensions differ from intrinsic dimensions")
-                }
-                if (decodeOptions.outMimeType != snapshot.mimeType) {
-                    throw IOException("Full decoder MIME differs from registered image MIME")
-                }
-                if (bitmap.config != Bitmap.Config.ARGB_8888) {
-                    throw IOException("Decoded bitmap did not use ARGB_8888")
-                }
-                BoundedImageDecodePolicy.requireBitmapBytes(
-                    bitmap.byteCount.toLong(), bitmap.allocationByteCount.toLong(),
-                )
-                if (bitmap.byteCount.toLong() != budget.argbBytes) {
-                    throw IOException("Decoded pixel storage differs from the expected ARGB_8888 size")
-                }
-                currentCoroutineContext().ensureActive()
-                VerifiedDecodedImageInfo(
+            val info = BoundedImageBytesInspector.inspect(
+                expected = ExpectedEncodedImage(
                     assetId = snapshot.assetId,
                     mimeType = snapshot.mimeType,
                     sha256 = snapshot.sha256,
                     encodedBytes = snapshot.byteSize,
-                    width = budget.width,
-                    height = budget.height,
-                    pixels = budget.pixels,
-                )
-            } finally {
-                bitmap?.recycle()
-            }
-            // The decoded bitmap is gone before suspending; the acquisition lease
-            // and verified byte buffer remain scoped until the callback returns.
+                ),
+                exactBytes = bytes,
+            )
             currentCoroutineContext().ensureActive()
             action(info)
         }
