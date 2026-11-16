@@ -1,68 +1,121 @@
+# STO-08 V5 R1: promotable, fail-closed process-death host driver.
+# Audit is read-only (Git, file hashes, local SDK, read-only ADB). NO GRADLE.
+# Install and Execute are distinct, separately-approved modes with exact typed
+# confirmations. Neither alters Git, project sources, build outputs or main DB.
+# Install allows only pinned debug and androidTest APKs on the sole disposable AVD.
+# Execute allows only isolated process-death instrumentation on that AVD and
+# a single explicit `am force-stop com.notebook.app` after post-commit proof.
+# On failure preserve test fixture/evidence. Never auto-retry or delete it.
 [CmdletBinding()]
 param(
-    [ValidateSet('Audit','Execute')][string]$Mode = 'Audit',
-    [ValidateSet(26,37)][int]$ApiLevel = 26
+    [ValidateSet('Audit','Install','Execute')][string]$Mode = 'Audit',
+    [ValidateSet(26,37)][int]$ApiLevel = 37
 )
 $ErrorActionPreference = 'Stop'
+
 $repo = 'C:\Proj\notebook-app-sto08-i4b-2b'
-$head = '2a802060b871a2ce4d6d1c4ce5e7786176bef37d'
 $branch = 'feature/sto-08-c3a2-i4b-2b-byte-inspector'
-$testRel = 'android/app/src/androidTest/java/com/notebook/app/data/assets/ExportCommittedHoldProcessDeathAndroidTest.kt'
+$baselineHead = '155d4f4f5f79375dbd87216ac73256aa370fe2e8'
+$main = '9226f1850fa6c53612ace5bd79f99954a1c77259'
 $driverRel = 'android/scripts/sto08_i5b7d3c_hold_process_death_host_driver.ps1'
+$baselineDriverGitBlob = '2abc131254b26da734feabb8ae6b7fc76f2d2602'
+$allowedDocumentationChanges = @(
+    'docs/architecture/sto_08_i5b2_export_hold_contract_v0_1.md',
+    'docs/architecture/sto_08_i5b4_export_hold_persistence_decision_packet_v0_1.md',
+    'docs/architecture/sto_08_i5b7d_lifecycle_recovery_decision_packet_v0_1.md'
+)
+$testRel = 'android/app/src/androidTest/java/com/notebook/app/data/assets/ExportCommittedHoldProcessDeathAndroidTest.kt'
 $testSha = 'E76024ED3D7C942053346D4EB95F2D25F797084FA6FC5C84E718D70E9DF1A293'
-$sourcePins = @{
+$sourcePins = [ordered]@{
     'android/app/src/main/java/com/notebook/app/data/assets/ExportAtomicHoldAdmission.kt' = '3B45687EF7C8E4744EAE178E3CE751D2008D4FF61CF173F8549C10043A20BC99'
     'android/app/src/main/java/com/notebook/app/data/assets/ExportHoldRecoveryInventory.kt' = '313D7824001F2A6191C3451C3504DE0B1F2236DDAC20598F21E4D0090544A595'
     'android/app/src/main/java/com/notebook/app/data/local/dao/ExportHoldAdmissionDao.kt' = 'BB89C5A6E6DC93F17D84C0EB0FE7E902EAF61A4DCBA490A54CA0C1C6697C521D'
     'android/app/src/main/java/com/notebook/app/data/local/ExportHoldSchemaGuards.kt' = 'CE1CEFA53B4AFF07AA45AD5EBE95A61F3783EACAD5576F7451370336606C7B08'
 }
-$adbSerial = 'emulator-5554'
-$targetPackage = 'com.notebook.app'
+$target = 'com.notebook.app'
 $testPackage = 'com.notebook.app.test'
-$instrumentation = 'com.notebook.app.test/androidx.test.runner.AndroidJUnitRunner'
+$runner = 'com.notebook.app.test/androidx.test.runner.AndroidJUnitRunner'
 $testClass = 'com.notebook.app.data.assets.ExportCommittedHoldProcessDeathAndroidTest'
 $prepareMethod = 'prepareCommittedHoldsAndAwaitExternalProcessDeath'
 $verifyMethod = 'verifyCommittedHoldsInFreshProcess'
-# Proven local APKs: both must be re-pulled and byte-compared from the actual
-# target emulator BEFORE PREPARE and again immediately BEFORE FORCE-STOP.
 $appApkRel = 'android/app/build/outputs/apk/debug/app-debug.apk'
 $testApkRel = 'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk'
 $appApkSha = '17D2F162715BAC6555BF36806CFD26EB1F713156466B9DB5CB569595C6D4A412'
 $testApkSha = '0CFBC64614E2C44408E444B8B9DE0BC53676C4484B6012D17360D11AFD9BEF8F'
+$expectedAvd = if ($ApiLevel -eq 26) { 'STO08_API26_Disposable' } else { 'STO07_S03B_Disposable' }
 
-function Assert([bool]$ok, [string]$errorMessage) { if (-not $ok) { throw $errorMessage } }
-function Here([string]$rel) { Join-Path $repo ($rel -replace '/', '\') }
-function Git([string[]]$arguments) {
-    $out = @(& git.exe -C $repo @arguments)
-    Assert ($LASTEXITCODE -eq 0) "Git failure: $($arguments -join ' ')"
-    return $out
+function Assert([bool]$Condition,[string]$Message) { if (-not $Condition) { throw $Message } }
+function At([string]$Rel) { return Join-Path $repo ($Rel -replace '/', '\') }
+function Git([string[]]$Arguments) {
+    $output = @(& git.exe -C $repo @Arguments)
+    Assert ($LASTEXITCODE -eq 0) "Git failure: $($Arguments -join ' ')"
+    return $output
+}
+function OneGit([string[]]$Arguments) {
+    $items = @(Git $Arguments)
+    Assert ($items.Count -eq 1) "Unexpected Git output count: $($Arguments -join ' ')"
+    return [string]$items[0]
+}
+function Sha([string]$File) {
+    Assert (Test-Path -LiteralPath $File -PathType Leaf) "Missing protected file: $File"
+    return (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash
 }
 function CheckRepo {
-    Assert ((@(Git @('branch','--show-current')) | Select-Object -First 1) -ceq $branch) 'Unexpected branch'
-    Assert ((@(Git @('rev-parse','HEAD')) | Select-Object -First 1) -ceq $head) 'Unexpected commit; host driver must be re-reviewed'
-    Assert (@(Git @('diff','--cached','--name-only')).Count -eq 0) 'Staged Git changes; refuse'
-    $actual = @(& git.exe -C $repo status --porcelain=v1 --untracked-files=all | Sort-Object)
-    Assert ($LASTEXITCODE -eq 0) 'Git status failed'
-    $wanted = @("?? $testRel", "?? $driverRel") | Sort-Object
-    Assert (($actual -join "`n") -ceq ($wanted -join "`n")) 'Expected exactly two untracked harness files and no other changes'
-    foreach ($rel in @($sourcePins.Keys | Sort-Object)) {
-        $actualHash = (Get-FileHash -LiteralPath (Here $rel) -Algorithm SHA256).Hash
-        Assert ($actualHash -ceq $sourcePins[$rel]) "Protected source hash mismatch: $rel"
+    Assert (Test-Path -LiteralPath $repo -PathType Container) 'Worktree D is missing'
+    Assert ((OneGit @('branch','--show-current')) -ceq $branch) 'Unexpected branch'
+    Assert ((OneGit @('rev-parse','origin/main')) -ceq $main) 'Local origin/main changed; re-audit'
+    $status = @(Git @('status','--porcelain=v1','--untracked-files=all'))
+    Assert ($status.Count -eq 0) "Worktree D is not clean: $($status -join '; ')"
+    # Promotion is a single driver-only commit directly following the frozen
+    # fully-tested baseline. Later commits may update ONLY three named docs.
+    # Any code/config/test/APK-affecting update fails closed until re-reviewed.
+    $currentHead = OneGit @('rev-parse','HEAD')
+    Assert ($currentHead -cne $baselineHead) 'Driver-only promotion commit is not present'
+    $commits = @(Git @('rev-list','--reverse',"$baselineHead..$currentHead"))
+    Assert ($commits.Count -gt 0) 'Expected promoted descendant of exact integration baseline'
+    $promotionCommit = [string]$commits[0]
+    Assert ((OneGit @('rev-parse',"$promotionCommit^")) -ceq $baselineHead) 'Driver promotion must directly descend from pinned baseline'
+    $promotionPaths = @(Git @('diff','--name-only',$baselineHead,$promotionCommit))
+    Assert ($promotionPaths.Count -eq 1 -and $promotionPaths[0] -ceq $driverRel) 'Promotion commit changed more than the tracked host driver'
+    $subsequentPaths = @(Git @('diff','--name-only',$promotionCommit,$currentHead))
+    foreach ($changed in $subsequentPaths) {
+        Assert ($allowedDocumentationChanges -ccontains $changed) "Unreviewed subsequent repository change: $changed"
     }
-    Assert ((Get-FileHash -LiteralPath (Here $testRel) -Algorithm SHA256).Hash -ceq $testSha) 'Process-death instrumentation class changed'
-    Assert ((Resolve-Path -LiteralPath $PSCommandPath).Path -ceq (Resolve-Path -LiteralPath (Here $driverRel)).Path) 'Host driver must run from exact protected worktree file'
-    Write-Host 'VERIFIED local HEAD, exact two-file untracked inventory, unchanged protected sources and exact instrumentation hash.'
+    # Check the frozen original driver blob remains the one independently audited.
+    Assert ((OneGit @('rev-parse',"${baselineHead}:$driverRel")) -ceq $baselineDriverGitBlob) 'Historical driver blob differs from pinned baseline'
+    # Invoke ONLY the tracked driver from the guarded worktree, not an outside copy.
+    $running = (Resolve-Path -LiteralPath $PSCommandPath).Path
+    $tracked = (Resolve-Path -LiteralPath (At $driverRel)).Path
+    Assert ($running -ceq $tracked) 'Run the committed driver from its exact worktree location'
+    foreach ($rel in @($driverRel,$testRel) + @($sourcePins.Keys)) {
+        $null = Git @('cat-file','-e',"HEAD:$rel")
+        Assert (Test-Path -LiteralPath (At $rel) -PathType Leaf) "Tracked file missing: $rel"
+    }
+    Assert ((Sha (At $testRel)) -ceq $testSha) 'Process-death test SHA changed'
+    foreach ($rel in @($sourcePins.Keys)) {
+        Assert ((Sha (At $rel)) -ceq $sourcePins[$rel]) "Protected source SHA changed: $rel"
+    }
+    Write-Host "VERIFIED clean HEAD=$currentHead, driver promotion=$promotionCommit, baseline=$baselineHead, local origin/main=$main; protected test/sources pinned."
 }
-# Capture stdout/stderr independently so PowerShell 5.1 never rewraps native
-# stderr as RemoteException. ADB exit codes remain mandatory.
-function Adb([string[]]$arguments,[int[]]$allowedExitCodes = @(0)) {
-    $all = @('-s',$adbSerial) + $arguments
-    foreach ($part in $all) {
-        Assert ($part -notmatch '[\r\n"]') 'Unsafe ADB argument; refuse'
+function CheckLocalApks {
+    $app = At $appApkRel
+    $testApk = At $testApkRel
+    Assert ((Sha $app) -ceq $appApkSha) 'Local debug APK hash mismatch; refuse'
+    Assert ((Sha $testApk) -ceq $testApkSha) 'Local androidTest APK hash mismatch; refuse'
+    Assert ((Get-Item -LiteralPath $app).Length -gt 1024) 'Local app APK size unreasonable'
+    Assert ((Get-Item -LiteralPath $testApk).Length -gt 1024) 'Local test APK size unreasonable'
+    Write-Host "VERIFIED pinned local APP=$appApkSha TEST=$testApkSha (NO build)."
+}
+# Separate native stdout/stderr; PowerShell 5.1 must not turn stderr into
+# native-command exception objects. Only specified commands and exit codes pass.
+function Adb([string[]]$Arguments,[int[]]$Allowed = @(0)) {
+    $argsList = @('-s',$script:serial) + $Arguments
+    foreach ($arg in $argsList) {
+        Assert ($arg -notmatch '[\r\n"]') "Unsafe ADB argument: $arg"
     }
     $psi = [Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $script:adbPath
-    $psi.Arguments = (@($all | ForEach-Object { '"' + $_ + '"' }) -join ' ')
+    $psi.FileName = $script:adbExe
+    $psi.Arguments = ($argsList | ForEach-Object { '"' + $_ + '"' }) -join ' '
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
@@ -70,7 +123,7 @@ function Adb([string[]]$arguments,[int[]]$allowedExitCodes = @(0)) {
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $psi
     try {
-        Assert ($process.Start()) 'Cannot launch exact installed ADB executable'
+        Assert ($process.Start()) 'Could not start pinned local ADB'
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
@@ -78,191 +131,261 @@ function Adb([string[]]$arguments,[int[]]$allowedExitCodes = @(0)) {
         $stderr = $stderrTask.GetAwaiter().GetResult()
         $exitCode = $process.ExitCode
     } finally { $process.Dispose() }
-    Assert ($allowedExitCodes -contains $exitCode) "ADB exit $exitCode for $($all -join ' '); stderr=$stderr; stdout=$stdout"
-    # Some ADB subcommands write progress messages to stderr; no stderr text is
-    # accepted as proof. All essential facts are independently parsed/hash-checked.
+    Assert ($Allowed -contains $exitCode) "ADB exit ${exitCode}: $($Arguments -join ' '); stderr=$stderr; stdout=$stdout"
     return @($stdout -split '\r?\n' | Where-Object { $_.Trim().Length -gt 0 })
 }
-function ReadTargetPid {
-    $text = (@(Adb @('shell','pidof',$targetPackage) @(0,1)) -join ' ').Trim()
+function DeviceIdentity {
+    $sdk = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
+    $script:adbExe = Join-Path $sdk 'platform-tools\adb.exe'
+    Assert (Test-Path -LiteralPath $script:adbExe -PathType Leaf) 'ADB not installed in expected SDK'
+    $devices = @(& $script:adbExe devices -l)
+    Assert ($LASTEXITCODE -eq 0) 'adb devices -l failed'
+    $rows = @($devices | Where-Object {
+        $_.Trim().Length -gt 0 -and $_ -notmatch '^List of devices attached' -and $_ -notmatch '^\*'
+    })
+    Assert ($rows.Count -eq 1) "Must be exactly one attached device: $($rows -join '; ')"
+    $match = [regex]::Match([string]$rows[0], '^(emulator-\d+)\s+device(?:\s|$)')
+    Assert $match.Success "Sole device is not an online emulator: $($rows[0])"
+    $script:serial = $match.Groups[1].Value
+    $api = (@(Adb @('shell','getprop','ro.build.version.sdk')) -join '').Trim()
+    $boot = (@(Adb @('shell','getprop','sys.boot_completed')) -join '').Trim()
+    $name = @(Adb @('emu','avd','name')) | ForEach-Object { $_.ToString().Trim() }
+    Assert ($api -ceq "$ApiLevel") "Unexpected API $api, expected $ApiLevel"
+    Assert ($boot -ceq '1') 'Emulator not booted'
+    Assert (($name -contains $expectedAvd) -and ($name -contains 'OK')) "Expected exact disposable AVD $expectedAvd"
+    Write-Host "VERIFIED sole $script:serial API=$ApiLevel AVD=$expectedAvd booted=1."
+}
+function ReadPid {
+    $text = (@(Adb @('shell','pidof',$target) @(0,1)) -join ' ').Trim()
     if ($text.Length -eq 0) { return $null }
     Assert ($text -match '^\d+$') "Ambiguous target PID: $text"
     return [int]$text
 }
-function CheckDevice([bool]$requireIdle = $true) {
-    $devices = @(& $script:adbPath devices -l)
-    Assert ($LASTEXITCODE -eq 0) 'adb devices failed'
-    $attached = @($devices | Where-Object {
-        $_.Trim().Length -gt 0 -and $_ -notmatch '^List of devices attached'
-    })
-    Assert ($attached.Count -eq 1 -and $attached[0] -match '^emulator-5554\s+device(?:\s|$)') 'Requires emulator-5554 as sole attached device (no offline/extra entries)'
-    Assert ((@(Adb @('shell','getprop','ro.build.version.sdk')) -join '').Trim() -ceq "$ApiLevel") 'Incorrect Android API level'
-    Assert ((@(Adb @('shell','getprop','sys.boot_completed')) -join '').Trim() -ceq '1') 'Device not fully booted'
-    $avdLines = @(Adb @('emu','avd','name')) | ForEach-Object { $_.Trim() }
-    $expectedAvd = if ($ApiLevel -eq 26) { 'STO08_API26_Disposable' } else { 'STO07_S03B_Disposable' }
-    Assert (($avdLines -contains $expectedAvd) -and ($avdLines -contains 'OK')) "Unexpected AVD name; expected $expectedAvd"
-    $installedTarget = @(Adb @('shell','pm','path',$targetPackage)) -join "`n"
-    $installedTest = @(Adb @('shell','pm','path',$testPackage)) -join "`n"
-    Assert ($installedTarget -match 'package:' -and $installedTest -match 'package:') 'Both debug/test APKs must already be installed; driver never installs them'
-    $instruments = @(Adb @('shell','pm','list','instrumentation')) -join "`n"
-    Assert ($instruments.Contains($instrumentation) -and $instruments.Contains("target=$targetPackage")) 'Installed instrumentation component/target mismatch'
-    if ($requireIdle) {
-        Assert ($null -eq (ReadTargetPid)) 'Target app process already running; do not force-stop or disturb it'
-    }
-    Write-Host "VERIFIED sole $adbSerial, API $ApiLevel, exact AVD $expectedAvd, installed target/test packages and runner."
+function GetPackages {
+    $inventory = @(Adb @('shell','pm','list','packages') | ForEach-Object { $_.ToString().Trim() })
+    Assert ($inventory.Count -gt 0) 'Empty installed-package inventory; refuse'
+    $bad = @($inventory | Where-Object { $_ -cnotmatch '^package:[A-Za-z0-9._]+$' })
+    Assert ($bad.Count -eq 0) 'Invalid package inventory; refuse'
+    return @($inventory)
 }
-function OneInstalledBaseApk([string]$packageName) {
-    $paths = @(Adb @('shell','pm','path',$packageName))
-    Assert ($paths.Count -eq 1) "Expected exactly one installed (non-split) APK for $packageName"
-    $match = [regex]::Match($paths[0].Trim(),
-        '^package:(/data/app/[A-Za-z0-9_./~+@=\-]+/base\.apk)$')
-    Assert $match.Success "Unexpected installed APK path for $packageName"
-    Assert ($match.Groups[1].Value -notmatch '/\.\.?/') 'Installed APK path contains traversal'
+function CheckPackages([bool]$RequireInstalled) {
+    $packages = @(GetPackages)
+    $appFound = ($packages -ccontains "package:$target")
+    $testFound = ($packages -ccontains "package:$testPackage")
+    Write-Host "INSTALLED_APP=$appFound INSTALLED_TEST=$testFound"
+    if ($RequireInstalled) {
+        Assert ($appFound -and $testFound) 'Both pinned APKs must already be installed; use separately approved Install mode'
+    }
+    if ($testFound) {
+        $instruments = (@(Adb @('shell','pm','list','instrumentation')) -join "`n")
+        Assert ($instruments.Contains($runner) -and $instruments.Contains("target=$target")) 'Unexpected installed test instrumentation runner'
+        Write-Host 'VERIFIED exact instrumentation component and target package.'
+    }
+    return @($appFound,$testFound)
+}
+function OneInstalledBase([string]$Package) {
+    $paths = @(Adb @('shell','pm','path',$Package))
+    Assert ($paths.Count -eq 1) "Expected one non-split installed APK for $Package"
+    $match = [regex]::Match([string]$paths[0], '^package:(/data/app/[A-Za-z0-9_./~+@=\-]+/base\.apk)$')
+    Assert $match.Success "Unsafe or unexpected installed APK path: $($paths -join '; ')"
+    Assert ($match.Groups[1].Value -notmatch '/\.\.?/') 'Traversal in APK path'
     return $match.Groups[1].Value
 }
-function CheckInstalledApkBytes([string]$phase,[string]$evidenceRoot) {
-    Assert (@('before-prepare','before-kill') -ccontains $phase) 'Unexpected APK verification phase'
+function EvidenceRoot([string]$Kind) {
+    $downloads = Join-Path $env:USERPROFILE 'Downloads'
+    Assert (Test-Path -LiteralPath $downloads -PathType Container) 'Downloads directory missing'
+    $nonce = [guid]::NewGuid().ToString('D')
+    $path = Join-Path $downloads "sto08_v4_${Kind}_api${ApiLevel}_$nonce"
+    Assert (-not (Test-Path -LiteralPath $path)) 'Evidence collision; refuse'
+    [void][IO.Directory]::CreateDirectory($path)
+    Write-Host "EVIDENCE_DIR=$path"
+    return $path
+}
+function PullAndVerify([string]$Phase,[string]$Root) {
+    Assert (@('after-install','before-prepare','before-kill') -ccontains $Phase) 'Unknown APK proof phase'
     CheckRepo
-    CheckDevice ($phase -ceq 'before-prepare')
-    $appLocal = Here $appApkRel
-    $testLocal = Here $testApkRel
-    Assert (Test-Path -LiteralPath $appLocal -PathType Leaf) 'Missing pinned local app APK'
-    Assert (Test-Path -LiteralPath $testLocal -PathType Leaf) 'Missing pinned local test APK'
-    Assert ((Get-FileHash -LiteralPath $appLocal -Algorithm SHA256).Hash -ceq $appApkSha) 'Local app APK SHA changed'
-    Assert ((Get-FileHash -LiteralPath $testLocal -Algorithm SHA256).Hash -ceq $testApkSha) 'Local test APK SHA changed'
-    $appRemote = OneInstalledBaseApk $targetPackage
-    $testRemote = OneInstalledBaseApk $testPackage
-    $phaseDir = Join-Path $evidenceRoot "apk-$phase"
-    Assert (-not (Test-Path -LiteralPath $phaseDir)) 'APK evidence phase directory already exists'
+    CheckLocalApks
+    DeviceIdentity
+    $null = CheckPackages $true
+    $phaseDir = Join-Path $Root "apk-$Phase"
+    Assert (-not (Test-Path -LiteralPath $phaseDir)) 'APK evidence directory collision'
     [void][IO.Directory]::CreateDirectory($phaseDir)
+    $appRemote = OneInstalledBase $target
+    $testRemote = OneInstalledBase $testPackage
     $appPulled = Join-Path $phaseDir 'installed-app-base.apk'
     $testPulled = Join-Path $phaseDir 'installed-test-base.apk'
     $null = Adb @('pull',$appRemote,$appPulled)
     $null = Adb @('pull',$testRemote,$testPulled)
-    foreach ($file in @($appPulled,$testPulled)) {
-        Assert (Test-Path -LiteralPath $file -PathType Leaf) "Missing pulled APK: $file"
-        Assert ((Get-Item -LiteralPath $file).Length -gt 1024) "Unexpected pulled APK size: $file"
-    }
-    $actualApp = (Get-FileHash -LiteralPath $appPulled -Algorithm SHA256).Hash
-    $actualTest = (Get-FileHash -LiteralPath $testPulled -Algorithm SHA256).Hash
-    Assert ($actualApp -ceq $appApkSha) "Installed APP APK SHA mismatch during $phase; NO KILL"
-    Assert ($actualTest -ceq $testApkSha) "Installed TEST APK SHA mismatch during $phase; NO KILL"
+    Assert ((Sha $appPulled) -ceq $appApkSha) "DEVICE APP APK SHA differs at $Phase; refuse to kill"
+    Assert ((Sha $testPulled) -ceq $testApkSha) "DEVICE TEST APK SHA differs at $Phase; refuse to kill"
     CheckRepo
-    Assert ((Get-FileHash -LiteralPath $appLocal -Algorithm SHA256).Hash -ceq $appApkSha) 'Local app changed during APK verification'
-    Assert ((Get-FileHash -LiteralPath $testLocal -Algorithm SHA256).Hash -ceq $testApkSha) 'Local test changed during APK verification'
-    Write-Host "VERIFIED $phase installed APP=$actualApp TEST=$actualTest AVD=API$ApiLevel."
+    CheckLocalApks
+    Write-Host "VERIFIED installed APK bytes at $Phase, hashes match both pinned local files."
 }
-function PhaseOutput([string]$method,[string]$phase,[string]$nonce) {
-    return @('-s',$adbSerial,'shell','am','instrument','-w','-r',
-        '-e','sto08HoldPdPhase',$phase,'-e','sto08HoldRun',$nonce,
-        '-e','class',"$testClass#$method",$instrumentation)
-}
-function LogMarkers([string]$pattern) {
+function LogMatches([string]$Marker) {
     $lines = @(Adb @('logcat','-d','-v','brief','-s','STO08_PD_HOLD:I','*:S'))
-    return @($lines | Where-Object { $_.Contains($pattern) })
+    return @($lines | Where-Object { $_.Contains($Marker) })
+}
+function PhaseArgs([string]$Method,[string]$Phase,[string]$Nonce) {
+    return @('-s',$script:serial,'shell','am','instrument','-w','-r',
+        '-e','sto08HoldPdPhase',$Phase,'-e','sto08HoldRun',$Nonce,
+        '-e','class',"$testClass#$Method",$runner)
+}
+function ValidUuid([string]$Value) {
+    try { return ([guid]::Parse($Value).ToString('D') -ceq $Value) }
+    catch { return $false }
 }
 
-Write-Host '=== STO-08 I5-B7D-3C: HOLD PROCESS-DEATH HOST DRIVER ==='
-Write-Host 'Default Audit mode: no ADB, APK, kill, fixture, Gradle, source, SDK or Git writes.'
-Write-Host 'Execute mode is NOT approved by the compile-only checkpoint and requires separate explicit authorization.'
+Write-Host "=== STO-08 V5-R1: PROMOTED PROCESS-DEATH DRIVER ($Mode / API $ApiLevel) ==="
+Write-Host 'Audit: Git + APK files + SDK/device/package inventory only. No Gradle, install, pull, instrumentation, kill or Git writes.'
+Write-Host 'Install and Execute: separate approvals are mandatory; each has an independent exact confirmation.'
+Write-Host 'No production export wiring, source edits, receipts, hold release, VERIFIED promotion or GC.'
+Write-Host "Driver location: $PSCommandPath"
+Write-Host "`n=== Gate 0: Committed source integrity ==="
 CheckRepo
+Write-Host "`n=== Gate 1: Local APK integrity ==="
+CheckLocalApks
+Write-Host "`n=== Gate 2: Sole disposable device identity and package inventory ==="
+DeviceIdentity
+$installed = @(CheckPackages $false)
+$targetPid = ReadPid
+Write-Host "TARGET_APP_PID=$(if ($null -eq $targetPid) {'NOT_RUNNING'} else {$targetPid})"
 if ($Mode -eq 'Audit') {
-    Write-Host 'AUDIT PASSED: exact local harness sources; no device touched. Execute remains UNAUTHORIZED.'
+    CheckRepo
+    CheckLocalApks
+    Write-Host "`n=== STO-08 V5-R1 AUDIT PASSED ==="
+    if (-not $installed[0] -and -not $installed[1]) {
+        Write-Host 'NEXT_STAGE=INSTALL_PINNED_DEBUG_AND_TEST_APKS (NOT AUTHORIZED; seek separate approval).'
+    } elseif ($installed[0] -and $installed[1]) {
+        Write-Host 'NEXT_STAGE=INSTALLED_APK_BYTE_ATTESTATION_AND_PROCESS_DEATH (NOT AUTHORIZED).'
+    } else {
+        Write-Host 'NEXT_STAGE=PARTIAL_PACKAGE_STATE; STOP AND INVESTIGATE. DO NOT AUTO-REPLACE.'
+    }
+    Write-Host 'No APK installed/pulled, instrumentation, process death, fixture writes or cleanup was attempted.'
     exit 0
 }
 
-$approved = Read-Host "To AUTHORIZE API $ApiLevel app process termination on the named disposable AVD, type EXECUTE I5-B7D-3D API$ApiLevel"
-Assert ($approved -ceq "EXECUTE I5-B7D-3D API$ApiLevel") 'Explicit authorization was not given'
-$sdk = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
-$adbPath = Join-Path $sdk 'platform-tools\adb.exe'
-Assert (Test-Path -LiteralPath $adbPath -PathType Leaf) 'Installed adb.exe not found'
-CheckDevice
+Assert ($null -eq $targetPid) 'Target app is active: do not disturb its process or data'
+if ($Mode -eq 'Install') {
+    Assert (-not $installed[0] -and -not $installed[1]) 'Install refuses existing or partially installed packages; no replace/uninstall'
+    Write-Host 'Install scope: pinned local APP and TEST APKs on EXACT disposable AVD only; no instrumentation or process kill.'
+    $reply = Read-Host "After separate V4 API $ApiLevel Install approval, type INSTALL STO-08 V4 API$ApiLevel PINNED-APKS"
+    Assert ($reply -ceq "INSTALL STO-08 V4 API$ApiLevel PINNED-APKS") 'Install confirmation missing'
+    CheckRepo; CheckLocalApks; DeviceIdentity
+    $again = @(CheckPackages $false)
+    Assert (-not $again[0] -and -not $again[1]) 'Installed packages changed; no install'
+    Assert ($null -eq (ReadPid)) 'App became active; no install'
+    $root = EvidenceRoot 'install'
+    Write-Host 'Installing only exact pinned debug app APK; no -r/reinstall.'
+    $appInstall = @(Adb @('install',(At $appApkRel)))
+    Assert (@($appInstall | Where-Object { $_.Trim() -ceq 'Success' }).Count -eq 1) 'App install did not report success; preserve state and stop'
+    CheckRepo; DeviceIdentity
+    $afterApp = @(CheckPackages $false)
+    Assert ($afterApp[0] -and -not $afterApp[1]) 'Unexpected packages after app install; stop'
+    Write-Host 'Installing only exact pinned androidTest APK; no -r/reinstall.'
+    $testInstall = @(Adb @('install',(At $testApkRel)))
+    Assert (@($testInstall | Where-Object { $_.Trim() -ceq 'Success' }).Count -eq 1) 'Test install did not report success; preserve state and stop'
+    PullAndVerify 'after-install' $root
+    Assert ($null -eq (ReadPid)) 'Target app is running after installation; do not launch instrumentation'
+    CheckRepo
+    Write-Host "=== STO-08 V4 API $ApiLevel PINNED-APK INSTALL VERIFIED ==="
+    Write-Host 'No test/kill performed. Separate Execute approval still required. No automatic retries or cleanup.'
+    exit 0
+}
+
+Assert ($Mode -ceq 'Execute') 'Unexpected execution mode'
+Assert ($installed[0] -and $installed[1]) 'Execute requires both installed pinned APKs'
+Write-Host 'Execute scope: after byte-proof and READY marker, force-stop ONLY the isolated target package, then verify fresh-process holdings.'
+$reply = Read-Host "After separate V4 API $ApiLevel Process-Death approval, type EXECUTE STO-08 V4 API$ApiLevel PROCESS-DEATH"
+Assert ($reply -ceq "EXECUTE STO-08 V4 API$ApiLevel PROCESS-DEATH") 'Process-death confirmation missing'
+CheckRepo; CheckLocalApks; DeviceIdentity
+$null = CheckPackages $true
+Assert ($null -eq (ReadPid)) 'Target app started; do not interrupt'
 $nonce = [guid]::NewGuid().ToString('D')
-Assert ([guid]::Parse($nonce).ToString('D') -ceq $nonce) 'Generated nonce invalid'
-$previous = @(LogMarkers "run=$nonce")
-Assert ($previous.Count -eq 0) 'Non-fresh run nonce already in logcat'
-$runDir = Join-Path $env:TEMP "sto08-pd-hold-$nonce"
-Assert (-not (Test-Path -LiteralPath $runDir)) 'Host evidence directory already exists'
-[void][IO.Directory]::CreateDirectory($runDir)
-$prepareOut = Join-Path $runDir 'prepare_stdout.txt'
-$prepareErr = Join-Path $runDir 'prepare_stderr.txt'
-$verifyOut = Join-Path $runDir 'verify_stdout.txt'
-Write-Host '=== Pre-PREPARE: re-pull installed APK bytes and prove exact emulator identity ==='
-CheckInstalledApkBytes 'before-prepare' $runDir
-$arguments = PhaseOutput $prepareMethod 'hold-prepare' $nonce
-Write-Host "Launching dedicated PREPARE instrumentation, nonce=$nonce. Evidence: $runDir"
-$child = Start-Process -FilePath $adbPath -ArgumentList ($arguments -join ' ') -PassThru `
+Assert (ValidUuid $nonce) 'Nonce invalid'
+Assert (@(LogMatches "run=$nonce").Count -eq 0) 'Nonce already occurs in logcat'
+$root = EvidenceRoot 'process_death'
+$prepareOut = Join-Path $root 'prepare_stdout.txt'
+$prepareErr = Join-Path $root 'prepare_stderr.txt'
+$verifyOut = Join-Path $root 'verify_stdout.txt'
+$verifyErr = Join-Path $root 'verify_stderr.txt'
+PullAndVerify 'before-prepare' $root
+Assert ($null -eq (ReadPid)) 'Target process started before prepare; stop'
+$prepareArgs = PhaseArgs $prepareMethod 'hold-prepare' $nonce
+Write-Host "Launching host-driven PREPARE on $script:serial (nonce=$nonce)."
+$child = Start-Process -FilePath $script:adbExe -ArgumentList ($prepareArgs -join ' ') -PassThru `
     -RedirectStandardOutput $prepareOut -RedirectStandardError $prepareErr
+$clock = [Diagnostics.Stopwatch]::StartNew()
 $marker = $null
 for ($attempt = 0; $attempt -lt 60; $attempt++) {
     Start-Sleep -Seconds 1
-    $found = @(LogMarkers "READY_TO_KILL run=$nonce")
-    Assert ($found.Count -le 1) 'Multiple READY markers for this nonce; DO NOT kill'
-    if ($found.Count -eq 1) { $marker = $found[0]; break }
-    Assert (-not $child.HasExited) 'Prepare instrumentation exited before READY marker; DO NOT kill'
+    $found = @(LogMatches "READY_TO_KILL run=$nonce")
+    Assert ($found.Count -le 1) 'Duplicate READY markers; DO NOT KILL'
+    if ($found.Count -eq 1) { $marker = [string]$found[0]; break }
+    Assert (-not $child.HasExited) 'PREPARE transport exited before READY; DO NOT KILL'
 }
-Assert ($null -ne $marker) 'Timed out without exact READY marker; DO NOT kill'
-$match = [regex]::Match($marker,'READY_TO_KILL run=([0-9a-f-]{36}) pid=(\d+) operation=([0-9a-f-]{36})')
-Assert ($match.Success -and $match.Groups[1].Value -ceq $nonce) 'READY marker format/nonce mismatch'
-$preparedPid = [int]$match.Groups[2].Value
-$operationId = $match.Groups[3].Value
-Assert ($preparedPid -gt 0 -and $preparedPid -eq (ReadTargetPid)) 'READY PID does not match active target app PID; DO NOT kill'
-Assert (-not $child.HasExited) 'Prepare instrumentation already exited; DO NOT kill'
-Write-Host '=== Pre-TERMINATION: re-pull installed APKs and revalidate AVD ==='
-CheckInstalledApkBytes 'before-kill' $runDir
-CheckDevice $false
-$foundAgain = @(LogMarkers "READY_TO_KILL run=$nonce")
-Assert ($foundAgain.Count -eq 1 -and $foundAgain[0] -ceq $marker) 'READY marker changed or disappeared; NO KILL'
-Assert ($preparedPid -eq (ReadTargetPid)) 'Target process PID changed during APK verification; NO KILL'
-Assert (-not $child.HasExited) 'Prepare instrumentation exited before termination; NO KILL'
-# This is the ONLY termination call, after exact nonce/marker/PID/AVD and live-process checks.
-Write-Host "VERIFIED post-commit READY marker for exact PID $preparedPid; terminating ONLY $targetPackage on API $ApiLevel."
-$null = Adb @('shell','am','force-stop',$targetPackage)
-Start-Sleep -Seconds 2
-Assert ($null -eq (ReadTargetPid)) 'Target PID still present after force-stop; process death not proven'
-Assert ($child.WaitForExit(15000)) 'Prepare instrumentation transport did not terminate after app force-stop'
-# Prepare instrumentation abnormal exit is EXPECTED but is NEVER itself a pass criterion.
-$verifyArgs = PhaseOutput $verifyMethod 'hold-verify' $nonce
-Write-Host 'Launching fresh VERIFY instrumentation without reinstalling APKs or clearing app data.'
-# Capture the fresh VERIFY runner in separate host evidence streams. Native
-# PowerShell 5.1 stderr must never become a RemoteException pipeline object.
-$verifyErr = Join-Path $runDir 'verify_stderr.txt'
-$verifyChild = Start-Process -FilePath $adbPath -ArgumentList ($verifyArgs -join ' ') -PassThru `
-    -RedirectStandardOutput $verifyOut -RedirectStandardError $verifyErr
-Assert ($verifyChild.WaitForExit(90000)) 'VERIFY instrumentation timed out; preserve fixture and host evidence'
-$verifyChild.WaitForExit()
-$verifyExit = $verifyChild.ExitCode
-Assert (Test-Path -LiteralPath $verifyOut -PathType Leaf) 'Missing fresh VERIFY stdout evidence'
-Assert (Test-Path -LiteralPath $verifyErr -PathType Leaf) 'Missing fresh VERIFY stderr evidence'
-$verifyLines = @(Get-Content -LiteralPath $verifyOut)
-Assert ((Get-Item -LiteralPath $verifyErr).Length -eq 0) 'Unexpected VERIFY stderr; preserve evidence and investigate'
-# ADB's process exit is not an AndroidJUnitRunner verdict. In particular,
-# an otherwise successful `am instrument` may yield a nonzero host exit.
-# Require a complete, unique, one-test protocol instead; the independently
-# checked nonce/PID/operation marker below is also mandatory.
-$verifyText = $verifyLines -join "`n"
-$verifyStatuses = @($verifyLines | Where-Object { $_ -match '^INSTRUMENTATION_STATUS_CODE: -?\d+$' })
-Assert ($verifyStatuses.Count -eq 2 -and
-    $verifyStatuses[0] -ceq 'INSTRUMENTATION_STATUS_CODE: 1' -and
-    $verifyStatuses[1] -ceq 'INSTRUMENTATION_STATUS_CODE: 0') 'Fresh VERIFY start/pass statuses not exactly proven'
-Assert (@($verifyLines | Where-Object { $_ -ceq "INSTRUMENTATION_STATUS: test=$verifyMethod" }).Count -eq 2) 'Unexpected VERIFY method evidence'
-Assert (@($verifyLines | Where-Object { $_ -ceq "INSTRUMENTATION_STATUS: class=$testClass" }).Count -eq 2) 'Unexpected VERIFY class evidence'
-Assert (@($verifyLines | Where-Object { $_.Trim() -ceq 'OK (1 test)' }).Count -eq 1) 'Fresh VERIFY JUnit 1/1 success not proven'
-Assert (@($verifyLines | Where-Object { $_.Trim() -ceq 'INSTRUMENTATION_CODE: -1' }).Count -eq 1) 'Fresh VERIFY instrumentation success code missing or ambiguous'
-Assert (-not [regex]::IsMatch($verifyText,
-    '(?im)FAILURES!!!|INSTRUMENTATION_FAILED|INSTRUMENTATION_ABORTED|INSTRUMENTATION_RESULT:\s*shortMsg=|INSTRUMENTATION_STATUS_CODE:\s*-[0-9]+')) 'Fresh VERIFY runner contains a failure or error'
-$verified = @(LogMarkers "VERIFY_PASSED run=$nonce")
-Assert ($verified.Count -eq 1) 'Missing or ambiguous fresh VERIFY_PASSED marker'
-$matchVerify = [regex]::Match($verified[0],
-    'VERIFY_PASSED run=([0-9a-f-]{36}) oldPid=(\d+) newPid=(\d+) operation=([0-9a-f-]{36})')
-Assert ($matchVerify.Success -and $matchVerify.Groups[1].Value -ceq $nonce) 'Verify nonce mismatch'
-Assert ([int]$matchVerify.Groups[2].Value -eq $preparedPid -and
-    [int]$matchVerify.Groups[3].Value -ne $preparedPid) 'New-process PID transition not proven'
-Assert ($matchVerify.Groups[4].Value -ceq $operationId) 'Recovered operation ID mismatch'
+Assert ($null -ne $marker) 'No READY marker within 60 seconds; DO NOT KILL'
+$markerMatch = [regex]::Match($marker,
+    'READY_TO_KILL run=([0-9a-f-]{36}) pid=(\d+) operation=([0-9a-f-]{36})(?:\s|$)')
+Assert $markerMatch.Success 'Invalid READY marker; DO NOT KILL'
+Assert ($markerMatch.Groups[1].Value -ceq $nonce) 'READY nonce mismatch; DO NOT KILL'
+$preparedPid = [int]$markerMatch.Groups[2].Value
+$operationId = $markerMatch.Groups[3].Value
+Assert ((ValidUuid $operationId) -and $preparedPid -gt 0) 'Noncanonical operation or invalid PID; DO NOT KILL'
+Assert ($preparedPid -eq (ReadPid)) 'READY PID differs from live app PID; DO NOT KILL'
+Assert (-not $child.HasExited) 'PREPARE finished unexpectedly; DO NOT KILL'
+Write-Host "VERIFIED committed READY marker for PID=$preparedPid; reattesting both installed APKs."
+PullAndVerify 'before-kill' $root
+DeviceIdentity
+$null = CheckPackages $true
+Assert ($clock.Elapsed.TotalSeconds -lt 100) 'PREPARE wait deadline near; DO NOT KILL'
+$secondMarker = @(LogMatches "READY_TO_KILL run=$nonce")
+Assert ($secondMarker.Count -eq 1 -and $secondMarker[0] -ceq $marker) 'READY marker changed; DO NOT KILL'
+Assert ($preparedPid -eq (ReadPid)) 'PID changed during byte attestation; DO NOT KILL'
+Assert (-not $child.HasExited) 'PREPARE exited during byte attestation; DO NOT KILL'
 CheckRepo
-# Do not silently discard the host transport status: record it after all
-# Android/JUnit/unique recovery-marker and repository evidence is proven.
-Write-Host "OBSERVED VERIFY_ADB_HOST_EXIT=$verifyExit; Android/JUnit/nonce/PID/operation proof independently PASSED."
-Write-Host "=== I5-B7D-3D API $ApiLevel EXACT PROCESS-DEATH HOLD RETENTION GATE PASSED ==="
-Write-Host "nonce=$nonce preparePid=$preparedPid verifyPid=$($matchVerify.Groups[3].Value) operation=$operationId"
-Write-Host 'Only isolated Room holds survived; NO protected receipt, byte verification, release, VERIFIED or GC proved.'
+# The only application-process termination command in this driver.
+Write-Host "TERMINATING ONLY target package=$target PID=$preparedPid on $expectedAvd."
+$null = Adb @('shell','am','force-stop',$target)
+Start-Sleep -Seconds 2
+Assert ($null -eq (ReadPid)) 'Target process still alive after force-stop; evidence inconclusive'
+Assert ($child.WaitForExit(15000)) 'PREPARE host transport did not exit after force-stop'
+# The transport exit status is not evidence of JUnit success (PREPARE dies).
+DeviceIdentity
+CheckRepo
+Write-Host 'Launching fresh VERIFY instrumentation without APK reinstall or app-data clear.'
+$verifyArgs = PhaseArgs $verifyMethod 'hold-verify' $nonce
+$verifyChild = Start-Process -FilePath $script:adbExe -ArgumentList ($verifyArgs -join ' ') -PassThru `
+    -RedirectStandardOutput $verifyOut -RedirectStandardError $verifyErr
+Assert ($verifyChild.WaitForExit(90000)) 'VERIFY timed out; preserve all fixture/evidence'
+$verifyChild.WaitForExit()
+$hostExit = $verifyChild.ExitCode
+Assert (Test-Path -LiteralPath $verifyOut -PathType Leaf) 'VERIFY stdout missing'
+Assert (Test-Path -LiteralPath $verifyErr -PathType Leaf) 'VERIFY stderr missing'
+$lines = @(Get-Content -LiteralPath $verifyOut)
+$text = $lines -join "`n"
+$statuses = @($lines | Where-Object { $_ -match '^INSTRUMENTATION_STATUS_CODE: -?\d+$' })
+Assert ($statuses.Count -eq 2 -and $statuses[0] -ceq 'INSTRUMENTATION_STATUS_CODE: 1' -and
+    $statuses[1] -ceq 'INSTRUMENTATION_STATUS_CODE: 0') 'VERIFY exact start/pass statuses missing'
+Assert (@($lines | Where-Object { $_ -ceq "INSTRUMENTATION_STATUS: test=$verifyMethod" }).Count -eq 2) 'VERIFY method evidence ambiguous'
+Assert (@($lines | Where-Object { $_ -ceq "INSTRUMENTATION_STATUS: class=$testClass" }).Count -eq 2) 'VERIFY class evidence ambiguous'
+Assert (@($lines | Where-Object { $_.Trim() -ceq 'OK (1 test)' }).Count -eq 1) 'VERIFY JUnit 1/1 success not proven'
+Assert (@($lines | Where-Object { $_.Trim() -ceq 'INSTRUMENTATION_CODE: -1' }).Count -eq 1) 'VERIFY instrumentation result ambiguous'
+Assert (-not [regex]::IsMatch($text,
+    '(?im)FAILURES!!!|INSTRUMENTATION_FAILED|INSTRUMENTATION_ABORTED|INSTRUMENTATION_RESULT:\s*shortMsg=|INSTRUMENTATION_STATUS_CODE:\s*-[0-9]+')) 'VERIFY output reports failure'
+Assert ((Get-Item -LiteralPath $verifyErr).Length -eq 0) 'VERIFY stderr is nonempty; investigate before claiming pass'
+$verified = @(LogMatches "VERIFY_PASSED run=$nonce")
+Assert ($verified.Count -eq 1) 'Fresh VERIFY_PASSED marker missing/ambiguous'
+$matchVerify = [regex]::Match([string]$verified[0],
+    'VERIFY_PASSED run=([0-9a-f-]{36}) oldPid=(\d+) newPid=(\d+) operation=([0-9a-f-]{36})(?:\s|$)')
+Assert $matchVerify.Success 'Invalid fresh VERIFY marker'
+Assert ($matchVerify.Groups[1].Value -ceq $nonce) 'VERIFY nonce mismatch'
+Assert ([int]$matchVerify.Groups[2].Value -eq $preparedPid -and
+    [int]$matchVerify.Groups[3].Value -ne $preparedPid) 'Fresh-process PID transition not proven'
+Assert ($matchVerify.Groups[4].Value -ceq $operationId) 'Recovered operation ID differs from READY'
+CheckRepo
+Write-Host "HOST_ADB_VERIFY_EXIT=$hostExit (not used alone as a pass signal)"
+Write-Host "=== STO-08 V4 API $ApiLevel PROCESS-DEATH HOLD RETENTION PASSED ==="
+Write-Host "run=$nonce oldPid=$preparedPid newPid=$($matchVerify.Groups[3].Value) operation=$operationId"
+Write-Host "EVIDENCE_DIR=$root"
+Write-Host 'Only isolated Room holds survived. NO production receipt, protected release, VERIFIED or GC is proved.'
