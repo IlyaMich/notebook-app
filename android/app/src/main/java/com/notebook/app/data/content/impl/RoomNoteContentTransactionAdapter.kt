@@ -178,7 +178,7 @@ class RoomNoteContentTransactionAdapter(
         val owner = db.assetOwnershipDao().findPageReference(pageId)
         val asset = db.assetDao().findById(assetId)
         if (owner?.assetId != assetId || asset?.state != "finalized" ||
-            asset.mimeType != "application/pdf"
+            asset?.mimeType != "application/pdf"
         ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF source ownership mismatch")
     }
 
@@ -186,7 +186,7 @@ class RoomNoteContentTransactionAdapter(
         val owner = db.assetOwnershipDao().findElementReference(elementId)
         val asset = db.assetDao().findById(assetId)
         if (owner?.assetId != assetId || asset?.state != "finalized" ||
-            asset.mimeType !in setOf("image/png", "image/jpeg")
+            asset?.mimeType !in setOf("image/png", "image/jpeg")
         ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image source ownership mismatch")
     }
 
