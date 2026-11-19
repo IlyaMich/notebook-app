@@ -106,6 +106,9 @@ class RoomDocumentRepository private constructor(
      */
     internal suspend fun replaceVerifiedImage(command: InsertVerifiedImageCommand): DocumentCommit {
         val request = command.validated()
+        if (request.at != null) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Image replacement cannot change element order")
+        }
         val root = verifiedImageRoot ?: fail(
             LibraryErrorCode.UNSUPPORTED_CONTENT, "Verified image writer is not configured"
         )
