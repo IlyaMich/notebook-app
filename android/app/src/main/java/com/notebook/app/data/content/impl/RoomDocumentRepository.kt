@@ -369,10 +369,13 @@ class RoomDocumentRepository private constructor(
             if (ids.isEmpty()) false else {
                 val selected = requireSelected(existing, ids)
                 if (selected.any(::isLocked)) fail(LibraryErrorCode.PROTECTED_ENTITY, "Locked element cannot be removed")
-                if (selected.any(::isImageContent)) {
-                    fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image asset deletion is not supported")
+                // Image-owner release and row deletion share this same Room transaction.
+                // Never remove the original bytes or metadata here. A missing or
+                // inconsistent image projection aborts the entire logical edit.
+                for (row in selected) {
+                    if (isImageContent(row)) releaseVerifiedImageOwner(row)
+                    else rejectIndexedElementEdges(listOf(row))
                 }
-                rejectIndexedElementEdges(selected)
                 ids.forEach { check(db.elementDao().deleteById(it) == 1) }
                 val remaining = db.elementDao().listByPage(page.id)
                 setElementOrder(remaining, remaining.map { it.id }, revision)
@@ -613,6 +616,63 @@ class RoomDocumentRepository private constructor(
         }
         setElementOrder(db.elementDao().listByPage(page.id), desired, revision)
         return true
+    }
+
+    /**
+     * Release only an unambiguously matched persisted image owner. This does not
+     * establish reference-index completeness or eligibility for filesystem GC.
+     * The caller must be inside the document revision's Room transaction.
+     */
+    private suspend fun releaseVerifiedImageOwner(row: ElementEntity) {
+        val parsed = try {
+            JSONObject(row.elementJson)
+        } catch (_: org.json.JSONException) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Malformed image owner")
+        }
+        if (row.kind != "image" || parsed.optString("type") != "image" ||
+            parsed.optString("id") != row.id ||
+            parsed.keys().asSequence().toSet() !=
+                setOf("id", "type", "transform", "locked", "payload") ||
+            parsed.opt("locked") != false
+        ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Inconsistent image owner")
+
+        val payload = parsed.optJSONObject("payload")
+            ?: fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Missing image payload")
+        if (payload.keys().asSequence().toSet() != setOf("assetId", "frame", "opacity")) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Unsupported image payload")
+        }
+        val assetId = try {
+            LibraryValidation.canonicalId(payload.getString("assetId"))
+        } catch (_: Exception) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Invalid image asset ID")
+        }
+        val frame = payload.optJSONObject("frame")
+            ?: fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Missing image frame")
+        if (frame.keys().asSequence().toSet() != setOf("x", "y", "width", "height") ||
+            listOf("x", "y", "width", "height").any { !frame.optDouble(it).isFinite() } ||
+            frame.optDouble("width") <= 0 || frame.optDouble("height") <= 0 ||
+            !payload.optDouble("opacity").isFinite() ||
+            payload.optDouble("opacity") !in 0.0..1.0
+        ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Invalid image geometry")
+        val transform = parsed.optJSONArray("transform")
+            ?: fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Missing image transform")
+        if (transform.length() != 6 || (0 until 6).any { !transform.optDouble(it).isFinite() }) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Invalid image transform")
+        }
+        val determinant = transform.optDouble(0) * transform.optDouble(3) -
+            transform.optDouble(1) * transform.optDouble(2)
+        if (!determinant.isFinite() || determinant == 0.0) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Non-invertible image transform")
+        }
+        val dao = db.assetOwnershipDao()
+        val edge = dao.findElementReference(row.id)
+            ?: fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image owner has no indexed reference")
+        if (edge.assetId != assetId ||
+            db.assetDao().findById(assetId)?.state != "finalized"
+        ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image owner and reference disagree")
+        if (dao.removeElementReferenceIfMatches(row.id, assetId) != 1) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image owner reference changed")
+        }
     }
 
     /** A mismatched legacy index entry cannot be silently removed by an asset-free edit. */
