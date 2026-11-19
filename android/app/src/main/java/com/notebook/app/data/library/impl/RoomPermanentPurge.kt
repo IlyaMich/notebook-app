@@ -1,6 +1,8 @@
 package com.notebook.app.data.library.impl
 
+import com.notebook.app.data.assets.DocumentAssetReferenceInspector
 import com.notebook.app.data.content.validation.CanonicalContentValidator
+import org.json.JSONObject
 import com.notebook.app.data.library.LibraryErrorCode
 import com.notebook.app.data.library.LibraryValidation
 import com.notebook.app.data.library.model.Notebook
@@ -29,6 +31,8 @@ internal class RoomPermanentPurge(private val db: AppDatabase) {
         val notebookSurvivors: List<NotebookEntity>,
         val noteSurvivors: List<NoteEntity>,
         val quickNotesId: String?,
+        val pageOwnersToRelease: Map<String, String>,
+        val elementOwnersToRelease: Map<String, String>,
     )
 
     suspend fun preflight(batchInput: String): Plan {
@@ -75,7 +79,11 @@ internal class RoomPermanentPurge(private val db: AppDatabase) {
                 quickNotes.deletionBatchId != null || quickNotes.systemRole != Notebook.QUICK_NOTES_ROLE || quickNotes.id in notebookIds)
         ) fail(LibraryErrorCode.PROTECTED_ENTITY, "An active root Quick Notes notebook is required for rehoming")
 
-        // Fail closed on media / malformed payloads. No files or asset tables are touched.
+        // All owner projection edges in this exact purge batch are validated and
+        // fingerprinted while holding the caller's Room transaction. No source
+        // files or asset metadata are deleted by this operation.
+        val pageOwnersToRelease = mutableMapOf<String, String>()
+        val elementOwnersToRelease = mutableMapOf<String, String>()
         val identity = mutableListOf<String>()
         for (f in targetFolders) identity.add("F|${f.id}|${f.name}|${f.parentFolderId}|${f.deletedAtMillis}|${f.deletionBatchId}")
         for (n in targetNotebooks) identity.add("B|${n.id}|${n.name}|${n.parentFolderId}|${n.deletedAtMillis}|${n.deletionBatchId}|${n.systemRole}")
@@ -90,22 +98,59 @@ internal class RoomPermanentPurge(private val db: AppDatabase) {
                     !page.width.isFinite() || page.width <= 0.0 ||
                     !page.height.isFinite() || page.height <= 0.0 || page.revision > n.revision || page.revision < 0
                 ) fail(LibraryErrorCode.INVALID_INPUT, "Invalid stored page geometry or ordering")
-                if (db.assetOwnershipDao().findPageReference(page.id) != null) {
-                    fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed page ownership blocks permanent purge")
+                when (val finding = DocumentAssetReferenceInspector.pageBackground(page.backgroundJson)) {
+                    is DocumentAssetReferenceInspector.Finding.Reference -> {
+                        val edge = db.assetOwnershipDao().findPageReference(page.id)
+                            ?: fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF page missing owner reference")
+                        val asset = db.assetDao().findById(finding.assetId)
+                        if (edge.assetId != finding.assetId || asset?.state != "finalized" ||
+                            asset.mimeType != "application/pdf"
+                        ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF page ownership mismatch")
+                        pageOwnersToRelease[page.id] = finding.assetId
+                        identity.add("PR|${page.id}|${finding.assetId}")
+                    }
+                    DocumentAssetReferenceInspector.Finding.NoDirectReference -> {
+                        CanonicalContentValidator.background(page.backgroundJson)
+                        if (db.assetOwnershipDao().findPageReference(page.id) != null) {
+                            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Unexpected page reference")
+                        }
+                    }
+                    is DocumentAssetReferenceInspector.Finding.Unresolved ->
+                        fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Unresolved page reference")
                 }
-                CanonicalContentValidator.background(page.backgroundJson)
                 identity.add("P|${page.id}|${page.noteId}|${page.orderIndex}|${page.width}|${page.height}|${page.revision}|${page.backgroundJson}")
                 pageCount++
                 elements.listByPage(page.id).forEachIndexed { elementIndex, element ->
                     if (element.orderIndex != elementIndex.toLong() || element.pageId != page.id ||
                         element.revision > n.revision || element.revision < 0
                     ) fail(LibraryErrorCode.INVALID_INPUT, "Invalid stored element ordering or revision")
-                    if (db.assetOwnershipDao().findElementReference(element.id) != null) {
-                        fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed element ownership blocks permanent purge")
-                    }
-                    val (canonicalId, kind) = CanonicalContentValidator.element(element.elementJson)
-                    if (canonicalId != element.id || kind != element.kind) {
-                        fail(LibraryErrorCode.INVALID_INPUT, "Stored element index disagrees with canonical content")
+                    when (val finding = DocumentAssetReferenceInspector.element(element.elementJson)) {
+                        is DocumentAssetReferenceInspector.Finding.Reference -> {
+                            val jsonId = try {
+                                JSONObject(element.elementJson).optString("id")
+                            } catch (_: org.json.JSONException) {
+                                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Malformed image envelope")
+                            }
+                            if (element.kind != "image" || jsonId != element.id) {
+                                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image owner identity mismatch")
+                            }
+                            val edge = db.assetOwnershipDao().findElementReference(element.id)
+                                ?: fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image missing owner reference")
+                            val asset = db.assetDao().findById(finding.assetId)
+                            if (edge.assetId != finding.assetId || asset?.state != "finalized" ||
+                                asset?.mimeType !in setOf("image/png", "image/jpeg")
+                            ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image ownership mismatch")
+                            elementOwnersToRelease[element.id] = finding.assetId
+                            identity.add("ER|${element.id}|${finding.assetId}")
+                        }
+                        DocumentAssetReferenceInspector.Finding.NoDirectReference -> {
+                            val (canonicalId, kind) = CanonicalContentValidator.element(element.elementJson)
+                            if (canonicalId != element.id || kind != element.kind ||
+                                db.assetOwnershipDao().findElementReference(element.id) != null
+                            ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Inconsistent asset-free element")
+                        }
+                        is DocumentAssetReferenceInspector.Finding.Unresolved ->
+                            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Unresolved element reference")
                     }
                     identity.add("E|${element.id}|${element.pageId}|${element.orderIndex}|${element.kind}|${element.revision}|${element.elementJson}")
                     elementCount++
@@ -127,6 +172,8 @@ internal class RoomPermanentPurge(private val db: AppDatabase) {
             folderRows = targetFolders, notebookRows = targetNotebooks, noteRows = targetNotes,
             folderSurvivors = folderSurvivors, notebookSurvivors = notebookSurvivors,
             noteSurvivors = noteSurvivors, quickNotesId = quickNotes?.id,
+            pageOwnersToRelease = pageOwnersToRelease.toMap(),
+            elementOwnersToRelease = elementOwnersToRelease.toMap(),
         )
     }
 
@@ -145,11 +192,17 @@ internal class RoomPermanentPurge(private val db: AppDatabase) {
         for (note in plan.noteRows) {
             for (page in pages.listByNote(note.id)) {
                 for (element in elements.listByPage(page.id)) {
+                    plan.elementOwnersToRelease[element.id]?.let { assetId ->
+                        check(db.assetOwnershipDao().removeElementReferenceIfMatches(element.id, assetId) == 1)
+                    }
                     check(elements.deleteById(element.id) == 1)
                     if (!deletedFirstElement) {
                         deletedFirstElement = true
                         afterStep(PurgeStep.AFTER_FIRST_ELEMENT_DELETE)
                     }
+                }
+                plan.pageOwnersToRelease[page.id]?.let { assetId ->
+                    check(db.assetOwnershipDao().removePageReferenceIfMatches(page.id, assetId) == 1)
                 }
                 check(pages.deleteById(page.id) == 1)
             }
