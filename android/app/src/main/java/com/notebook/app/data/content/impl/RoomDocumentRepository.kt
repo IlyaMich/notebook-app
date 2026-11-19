@@ -86,7 +86,7 @@ class RoomDocumentRepository private constructor(
      * followed by the repository-owned Room transaction under that same lease.
      * The nullable root intentionally fails closed for existing production wiring.
      */
-    internal suspend fun insertVerifiedImage(command: InsertVerifiedImageCommand): DocumentCommit {
+    override suspend fun insertVerifiedImage(command: InsertVerifiedImageCommand): DocumentCommit {
         val request = command.validated()
         val root = verifiedImageRoot ?: fail(
             LibraryErrorCode.UNSUPPORTED_CONTENT, "Verified image writer is not configured"
@@ -104,7 +104,7 @@ class RoomDocumentRepository private constructor(
      * The previous owner edge, element JSON and note revision change atomically.
      * No asset bytes or metadata are reclaimed, including the previous original.
      */
-    internal suspend fun replaceVerifiedImage(command: InsertVerifiedImageCommand): DocumentCommit {
+    override suspend fun replaceVerifiedImage(command: InsertVerifiedImageCommand): DocumentCommit {
         val request = command.validated()
         if (request.at != null) {
             fail(LibraryErrorCode.INVALID_INPUT, "Image replacement cannot change element order")
