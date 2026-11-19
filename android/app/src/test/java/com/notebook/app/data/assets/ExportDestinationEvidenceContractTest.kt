@@ -3,7 +3,6 @@ package com.notebook.app.data.assets
 import com.notebook.app.data.assets.ExportDestinationEvidenceContract as Contract
 import java.util.UUID
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Pure JVM assertions; no paths, Room, assets, Android runtime, or export writes. */
@@ -12,8 +11,17 @@ class ExportDestinationEvidenceContractTest {
     private val b = "b".repeat(64)
     private val c = "c".repeat(64)
 
+    private val operationId = UUID.fromString("00000000-0000-4000-8000-000000000001")
+    private val noteId = "abcdef00-0000-4000-8000-000000000002"
+    private val otherId = UUID.fromString("00000000-0000-4000-8000-000000000003")
+    private val otherNoteId = "00000000-0000-4000-8000-000000000004"
+
+    private fun goodExpectation() = Contract.ProvenanceExpectation(operationId, noteId, 7L, a)
+    private fun goodObservation() = Contract.ObservedProvenance(operationId, noteId, 7L, a)
+
     private fun goodClaim() = Contract.Claim(
-        operationId = UUID.fromString("00000000-0000-4000-8000-000000000001"),
+        operationId = operationId,
+        observedProvenance = goodObservation(),
         expectedSnapshotSha256 = a,
         observedSnapshotSha256 = a,
         expectedManifestSha256 = b,
@@ -25,12 +33,16 @@ class ExportDestinationEvidenceContractTest {
         stageDirectorySyncClaimed = true,
     )
 
-    private fun rejected(claim: Contract.Claim, reason: Contract.Reason) {
-        assertEquals(Contract.Assessment.Rejected(reason), Contract.assess(claim))
+    private fun rejected(
+        claim: Contract.Claim,
+        reason: Contract.Reason,
+        expectation: Contract.ProvenanceExpectation = goodExpectation(),
+    ) {
+        assertEquals(Contract.Assessment.Rejected(reason), Contract.assess(expectation, claim))
     }
 
     @Test fun matchingObservationsRemainExplicitlyUntrusted() {
-        assertEquals(Contract.Assessment.CompleteUntrusted, Contract.assess(goodClaim()))
+        assertEquals(Contract.Assessment.CompleteUntrusted, Contract.assess(goodExpectation(), goodClaim()))
     }
 
     @Test fun missingCopyFailsClosed() {
@@ -104,6 +116,74 @@ class ExportDestinationEvidenceContractTest {
 
     @Test fun emptyMediaSetStillUntrusted() {
         val claim = goodClaim().copy(expectedCopies = emptyList(), observedCopies = emptyList())
-        assertEquals(Contract.Assessment.CompleteUntrusted, Contract.assess(claim))
+        assertEquals(Contract.Assessment.CompleteUntrusted, Contract.assess(goodExpectation(), claim))
+    }
+
+    @Test fun missingObservedProvenanceRejected() {
+        rejected(goodClaim().copy(observedProvenance = null), Contract.Reason.MISSING_PROVENANCE)
+    }
+
+    @Test fun differentClaimOperationRejected() {
+        rejected(goodClaim().copy(operationId = otherId), Contract.Reason.PROVENANCE_MISMATCH)
+    }
+
+    @Test fun differentObservedOperationRejected() {
+        rejected(goodClaim().copy(observedProvenance = goodObservation().copy(operationId = otherId)),
+            Contract.Reason.PROVENANCE_MISMATCH)
+    }
+
+    @Test fun differentObservedNoteRejected() {
+        rejected(goodClaim().copy(observedProvenance = goodObservation().copy(noteId = otherNoteId)),
+            Contract.Reason.PROVENANCE_MISMATCH)
+    }
+
+    @Test fun differentObservedRevisionRejected() {
+        rejected(goodClaim().copy(observedProvenance = goodObservation().copy(noteRevision = 8L)),
+            Contract.Reason.PROVENANCE_MISMATCH)
+    }
+
+    @Test fun negativeExpectedRevisionRejected() {
+        rejected(goodClaim(), Contract.Reason.INVALID_PROVENANCE,
+            goodExpectation().copy(noteRevision = -1L))
+    }
+
+    @Test fun negativeObservedRevisionRejected() {
+        rejected(goodClaim().copy(observedProvenance = goodObservation().copy(noteRevision = -1L)),
+            Contract.Reason.INVALID_PROVENANCE)
+    }
+
+    @Test fun malformedExpectedNoteIdRejected() {
+        rejected(goodClaim(), Contract.Reason.INVALID_PROVENANCE,
+            goodExpectation().copy(noteId = "bad-note-id"))
+    }
+
+    @Test fun noncanonicalObservedNoteIdRejected() {
+        rejected(goodClaim().copy(observedProvenance = goodObservation().copy(
+            noteId = noteId.uppercase(),
+        )), Contract.Reason.INVALID_PROVENANCE)
+    }
+
+    @Test fun invalidExpectedSnapshotDigestRejected() {
+        rejected(goodClaim(), Contract.Reason.INVALID_PROVENANCE,
+            goodExpectation().copy(snapshotSha256 = "NOT-SHA256"))
+    }
+
+    @Test fun missingObservedProvenanceSnapshotDigestRejected() {
+        rejected(goodClaim().copy(observedProvenance = goodObservation().copy(snapshotSha256 = null)),
+            Contract.Reason.MISSING_PROVENANCE)
+    }
+
+    @Test fun malformedObservedProvenanceSnapshotDigestRejected() {
+        rejected(goodClaim().copy(observedProvenance = goodObservation().copy(snapshotSha256 = "BAD")),
+            Contract.Reason.INVALID_PROVENANCE)
+    }
+
+    @Test fun differingObservedProvenanceSnapshotDigestRejected() {
+        rejected(goodClaim().copy(observedProvenance = goodObservation().copy(snapshotSha256 = b)),
+            Contract.Reason.PROVENANCE_MISMATCH)
+    }
+
+    @Test fun claimSnapshotExpectationContradictsIndependentExpectationRejected() {
+        rejected(goodClaim().copy(expectedSnapshotSha256 = b), Contract.Reason.PROVENANCE_MISMATCH)
     }
 }
