@@ -222,7 +222,6 @@ class AssetOwnershipTransactionBoundaryAndroidTest {
         val image = asset("image/png")
         val other = asset("image/png")
         val owner = mediaOwner(pdf, image)
-        val before = RoomDocumentRepository(db).load(owner.noteId)
         val original = db.elementDao().findById(owner.imageElementId)!!
         db.elementDao().update(original.copy(elementJson = imageJson(owner.imageElementId, other)))
         val repo = RoomDocumentRepository(db)
@@ -244,26 +243,85 @@ class AssetOwnershipTransactionBoundaryAndroidTest {
         gateUnverified()
     }
 
-    @Test fun existingImageTransferGuardPreservesIndexedEdgesAndRevision() = runBlocking {
+    @Test fun transferringIndexedImagePreservesOwnerEdgeAcrossPagesAndReopen() = runBlocking {
         val pdf = asset("application/pdf")
         val image = asset("image/png")
         val owner = mediaOwner(pdf, image)
+        val originalJson = db.elementDao().findById(owner.imageElementId)!!.elementJson
         val repo = RoomDocumentRepository(db)
-        val before = repo.load(owner.noteId)
 
-        val error = runCatching {
-            repo.commit(owner.noteId, DocumentEdit.TransferElements(
+        assertEquals(1L, repo.commitIfRevision(owner.noteId, 0L,
+            DocumentEdit.TransferElements(
                 owner.pageId, owner.secondPageId, listOf(owner.imageElementId),
-            ))
-        }.exceptionOrNull()
-
-        assertTrue("Image transfer must remain unsupported", error is LibraryOperationException)
-        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT, (error as LibraryOperationException).code)
-        assertEquals(before, repo.load(owner.noteId))
+            )).revision)
+        assertEquals(listOf(owner.textElementId),
+            db.elementDao().listByPage(owner.pageId).map { it.id })
+        assertEquals(listOf(owner.imageElementId),
+            db.elementDao().listByPage(owner.secondPageId).map { it.id })
+        assertEquals(originalJson, db.elementDao().findById(owner.imageElementId)!!.elementJson)
         assertEquals(ElementAssetReferenceEntity(owner.imageElementId, image),
             db.assetOwnershipDao().findElementReference(owner.imageElementId))
         assertEquals(PageAssetReferenceEntity(owner.pageId, pdf),
             db.assetOwnershipDao().findPageReference(owner.pageId))
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, databaseName)
+        assertEquals(owner.secondPageId,
+            db.elementDao().findById(owner.imageElementId)!!.pageId)
+        assertEquals(ElementAssetReferenceEntity(owner.imageElementId, image),
+            db.assetOwnershipDao().findElementReference(owner.imageElementId))
+        assertEquals(2, db.assetDao().countAll())
+        gateUnverified()
+        db.openHelper.writableDatabase.query("PRAGMA foreign_key_check").use {
+            assertEquals(0, it.count)
+        }
+    }
+
+    @Test fun mismatchedImageProjectionRejectsMixedTransferWithoutRevisionAdvance() = runBlocking {
+        val pdf = asset("application/pdf")
+        val image = asset("image/png")
+        val otherImage = asset("image/png")
+        val owner = mediaOwner(pdf, image)
+        val row = db.elementDao().findById(owner.imageElementId)!!
+        check(db.elementDao().update(row.copy(
+            elementJson = imageJson(owner.imageElementId, otherImage))) == 1)
+        val repo = RoomDocumentRepository(db)
+        val before = repo.load(owner.noteId)
+
+        val failure = runCatching {
+            repo.commitIfRevision(owner.noteId, 0L,
+                DocumentEdit.TransferElements(owner.pageId, owner.secondPageId,
+                    listOf(owner.textElementId, owner.imageElementId)))
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT,
+            (failure as LibraryOperationException).code)
+        assertEquals(before, repo.load(owner.noteId))
+        assertEquals(ElementAssetReferenceEntity(owner.imageElementId, image),
+            db.assetOwnershipDao().findElementReference(owner.imageElementId))
+        assertEquals(0L, db.noteDao().findById(owner.noteId)!!.revision)
+        gateUnverified()
+    }
+
+    @Test fun missingImageProjectionRejectsTransferWithoutMovingOtherElements() = runBlocking {
+        val pdf = asset("application/pdf")
+        val image = asset("image/png")
+        val owner = mediaOwner(pdf, image)
+        check(db.assetOwnershipDao().removeElementReferenceIfMatches(
+            owner.imageElementId, image) == 1)
+        val repo = RoomDocumentRepository(db)
+        val before = repo.load(owner.noteId)
+
+        val failure = runCatching {
+            repo.commit(owner.noteId, DocumentEdit.TransferElements(
+                owner.pageId, owner.secondPageId,
+                listOf(owner.textElementId, owner.imageElementId),
+            ))
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT,
+            (failure as LibraryOperationException).code)
+        assertEquals(before, repo.load(owner.noteId))
+        assertEquals(0L, db.noteDao().findById(owner.noteId)!!.revision)
         gateUnverified()
     }
 
