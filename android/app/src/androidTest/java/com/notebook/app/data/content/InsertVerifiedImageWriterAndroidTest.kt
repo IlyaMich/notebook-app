@@ -81,10 +81,10 @@ class InsertVerifiedImageWriterAndroidTest {
         return noteId to pageId
     }
 
-    private fun png(): ByteArray {
+    private fun png(color: Int = Color.rgb(38, 102, 189)): ByteArray {
         val bitmap = Bitmap.createBitmap(8, 6, Bitmap.Config.ARGB_8888)
         return try {
-            bitmap.eraseColor(Color.rgb(38, 102, 189))
+            bitmap.eraseColor(color)
             ByteArrayOutputStream().use { out ->
                 assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out))
                 out.toByteArray()
@@ -92,9 +92,9 @@ class InsertVerifiedImageWriterAndroidTest {
         } finally { bitmap.recycle() }
     }
 
-    private suspend fun imageAsset() = ManagedAssetRegistrar(
+    private suspend fun imageAsset(color: Int = Color.rgb(38, 102, 189)) = ManagedAssetRegistrar(
         ManagedAssetFileStore(root), db.assetDao()
-    ).register(ByteArrayInputStream(png()), "image/png")
+    ).register(ByteArrayInputStream(png(color)), "image/png")
 
     private fun command(note: String, page: String, asset: String, element: String = id(), rev: Long = 0L,
                         at: Int? = null) = InsertVerifiedImageCommand(
@@ -127,6 +127,71 @@ class InsertVerifiedImageWriterAndroidTest {
         assertEquals(element, db.elementDao().listByPage(page).single().id)
         assertEquals(asset.id, db.assetOwnershipDao().findElementReference(element)!!.assetId)
         assertEquals(1L, repo.load(note).revision)
+    }
+
+    @Test fun replacingWithVerifiedDifferentImageChangesOwnerAndPreservesBothOriginals() = runBlocking {
+        val (note, page) = noteAndPage()
+        val first = imageAsset()
+        val second = imageAsset(Color.rgb(190, 40, 55))
+        assertTrue(first.id != second.id)
+        val element = id()
+        repo.insertVerifiedImage(command(note, page, first.id, element))
+        val initial = db.elementDao().findById(element)!!
+        val commit = repo.replaceVerifiedImage(command(note, page, second.id, element, rev = 1L))
+        assertEquals(2L, commit.revision)
+        val updated = db.elementDao().findById(element)!!
+        assertEquals(initial.orderIndex, updated.orderIndex)
+        assertEquals(second.id, JSONObject(updated.elementJson)
+            .getJSONObject("payload").getString("assetId"))
+        assertEquals(second.id, db.assetOwnershipDao().findElementReference(element)?.assetId)
+        assertNotNull(db.assetDao().findById(first.id))
+        assertNotNull(db.assetDao().findById(second.id))
+        reopen()
+        assertEquals(2L, repo.load(note).revision)
+        assertEquals(second.id, db.assetOwnershipDao().findElementReference(element)?.assetId)
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun staleImageReplacementLeavesOriginalOwnerAndDocumentUnchanged() = runBlocking {
+        val (note, page) = noteAndPage()
+        val first = imageAsset()
+        val second = imageAsset(Color.rgb(190, 40, 55))
+        val element = id()
+        repo.insertVerifiedImage(command(note, page, first.id, element))
+        val before = repo.load(note)
+        val error = runCatching {
+            repo.replaceVerifiedImage(command(note, page, second.id, element, rev = 0L))
+        }.exceptionOrNull()
+        assertTrue(error is LibraryOperationException)
+        assertEquals(LibraryErrorCode.INVALID_INPUT, (error as LibraryOperationException).code)
+        assertEquals(before, repo.load(note))
+        assertEquals(first.id, db.assetOwnershipDao().findElementReference(element)?.assetId)
+    }
+
+    @Test fun failureAfterImageOwnerChangeRollsBackReferenceAndElement() = runBlocking {
+        val (note, page) = noteAndPage()
+        val first = imageAsset()
+        val second = imageAsset(Color.rgb(190, 40, 55))
+        val element = id()
+        repo.insertVerifiedImage(command(note, page, first.id, element))
+        val before = repo.load(note)
+        val marker = "sto08_forced_image_replace_abort"
+        val trigger = "sto08_replace_abort"
+        addAbortTrigger(trigger,
+            "BEFORE UPDATE ON elements BEGIN SELECT RAISE(ABORT, '$marker'); END")
+        try {
+            val error = runCatching {
+                repo.replaceVerifiedImage(command(note, page, second.id, element, rev = 1L))
+            }.exceptionOrNull()
+            assertInjectedAbort(error, marker)
+        } finally {
+            removeAbortTrigger(trigger)
+        }
+        assertEquals(before, repo.load(note))
+        assertEquals(first.id, db.assetOwnershipDao().findElementReference(element)?.assetId)
+        assertNotNull(db.assetDao().findById(second.id))
+        reopen()
+        assertEquals(first.id, db.assetOwnershipDao().findElementReference(element)?.assetId)
     }
 
     @Test fun staleExpectedRevisionRejectsWithoutElementOrEdge() = runBlocking {
