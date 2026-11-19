@@ -10,7 +10,7 @@ import com.notebook.app.data.library.LibraryValidation
  * No caller-supplied media JSON, MIME, path, hash, crop, or lock state.
  * Validation does not prove the asset exists or authorize attachment.
  */
-internal data class InsertVerifiedImageCommand(
+data class InsertVerifiedImageCommand(
     val noteId: String,
     val pageId: String,
     val elementId: String,
@@ -22,7 +22,7 @@ internal data class InsertVerifiedImageCommand(
     val opacity: Double,
 ) {
     /** Returns a defensive snapshot to carry across suspending verification. */
-    fun validated(): ValidatedInsertVerifiedImage {
+    internal fun validated(): ValidatedInsertVerifiedImage {
         val note = LibraryValidation.canonicalId(noteId)
         val page = LibraryValidation.canonicalId(pageId)
         val element = LibraryValidation.canonicalId(elementId)
@@ -57,7 +57,7 @@ internal data class InsertVerifiedImageCommand(
     }
 }
 
-internal data class ImageFrame(
+data class ImageFrame(
     val x: Double,
     val y: Double,
     val width: Double,
