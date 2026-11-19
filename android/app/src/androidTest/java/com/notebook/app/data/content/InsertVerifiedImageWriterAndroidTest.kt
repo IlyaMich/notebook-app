@@ -540,7 +540,7 @@ class InsertVerifiedImageWriterAndroidTest {
         assertEquals(listOf(first, image, last), db.elementDao().listByPage(page).map { it.id })
     }
 
-    @Test fun attachedImageCannotBeRemovedReplacedOrTransferredByGenericEdits() = runBlocking {
+    @Test fun attachedImageGenericReplacementRejectsButTransferAndRemovalPreserveOriginal() = runBlocking {
         val (note, page) = noteAndPage()
         val second = id()
         db.pageDao().insert(PageEntity(second, note, 1L, 595.0, 842.0,
@@ -548,28 +548,69 @@ class InsertVerifiedImageWriterAndroidTest {
         val asset = imageAsset()
         val image = id()
         assertEquals(1L, repo.insertVerifiedImage(command(note, page, asset.id, image)).revision)
-        val beforeNote = db.noteDao().findById(note)
-        val beforeImage = db.elementDao().findById(image)
-        val beforeEdge = db.assetOwnershipDao().findElementReference(image)
-        val attempts = listOf<DocumentEdit>(
-            DocumentEdit.RemoveElements(page, listOf(image)),
-            DocumentEdit.ReplaceElements(page, listOf(canonicalText(image))),
-            DocumentEdit.TransferElements(page, second, listOf(image)),
-            DocumentEdit.RemovePage(page),
-        )
-        for (edit in attempts) {
-            val failure = runCatching { repo.commit(note, edit) }.exceptionOrNull()
-            assertTrue("Expected protected media rejection for $edit",
-                failure is LibraryOperationException && failure.code == LibraryErrorCode.UNSUPPORTED_CONTENT)
-            assertEquals(beforeImage, db.elementDao().findById(image))
-            assertEquals(beforeEdge, db.assetOwnershipDao().findElementReference(image))
-            assertEquals(beforeNote, db.noteDao().findById(note))
-        }
+        val originalAsset = db.assetDao().findById(asset.id)!!
+        val originalBytes = File(root, asset.relativePath).readBytes()
+        val initialNote = db.noteDao().findById(note)
+        val initialElement = db.elementDao().findById(image)
+        val initialEdge = db.assetOwnershipDao().findElementReference(image)
+
+        // Generic replacement still cannot silently discard a verified media owner.
+        val failure = runCatching {
+            repo.commit(note, DocumentEdit.ReplaceElements(page, listOf(canonicalText(image))))
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryOperationException &&
+            failure.code == LibraryErrorCode.UNSUPPORTED_CONTENT)
+        assertEquals(initialNote, db.noteDao().findById(note))
+        assertEquals(initialElement, db.elementDao().findById(image))
+        assertEquals(initialEdge, db.assetOwnershipDao().findElementReference(image))
+
+        // D1 now supports checked transfer without changing the global element owner.
+        assertEquals(2L, repo.commitIfRevision(note, 1L,
+            DocumentEdit.TransferElements(page, second, listOf(image))).revision)
+        assertEquals(second, db.elementDao().findById(image)?.pageId)
+        assertEquals(initialEdge, db.assetOwnershipDao().findElementReference(image))
+
+        // A checked removal releases the edge, not the managed original.
+        assertEquals(3L, repo.commitIfRevision(note, 2L,
+            DocumentEdit.RemoveElements(second, listOf(image))).revision)
+        assertNull(db.elementDao().findById(image))
+        assertNull(db.assetOwnershipDao().findElementReference(image))
+        assertEquals(originalAsset, db.assetDao().findById(asset.id))
+        assertTrue(originalBytes.contentEquals(File(root, asset.relativePath).readBytes()))
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+
         reopen()
-        assertEquals(beforeImage, db.elementDao().findById(image))
-        assertEquals(beforeEdge, db.assetOwnershipDao().findElementReference(image))
+        assertNull(db.elementDao().findById(image))
+        assertNull(db.assetOwnershipDao().findElementReference(image))
+        assertEquals(3L, repo.load(note).revision)
+        assertEquals(originalAsset, db.assetDao().findById(asset.id))
+        assertTrue(originalBytes.contentEquals(File(root, asset.relativePath).readBytes()))
     }
 
+    @Test fun removingImagePageReleasesOwnerWithoutDeletingOriginal() = runBlocking {
+        val (note, page) = noteAndPage()
+        val second = id()
+        db.pageDao().insert(PageEntity(second, note, 1L, 595.0, 842.0,
+            """{"type":"blank","color":"#FFFFFF"}""", 0L))
+        val asset = imageAsset()
+        val image = id()
+        assertEquals(1L, repo.insertVerifiedImage(command(note, page, asset.id, image)).revision)
+        val originalAsset = db.assetDao().findById(asset.id)!!
+        val originalBytes = File(root, asset.relativePath).readBytes()
+
+        assertEquals(2L, repo.commitIfRevision(note, 1L,
+            DocumentEdit.RemovePage(page)).revision)
+        assertNull(db.pageDao().findById(page))
+        assertNull(db.elementDao().findById(image))
+        assertNull(db.assetOwnershipDao().findElementReference(image))
+        assertEquals(listOf(second), db.pageDao().listByNote(note).map { it.id })
+        assertEquals(originalAsset, db.assetDao().findById(asset.id))
+        assertTrue(originalBytes.contentEquals(File(root, asset.relativePath).readBytes()))
+        reopen()
+        assertEquals(2L, repo.load(note).revision)
+        assertEquals(originalAsset, db.assetDao().findById(asset.id))
+        assertTrue(originalBytes.contentEquals(File(root, asset.relativePath).readBytes()))
+    }
 
     @Test fun missingFinalizedOriginalRejectsBeforeOwnerTransaction() = runBlocking {
         val (note, page) = noteAndPage()
@@ -865,30 +906,36 @@ class InsertVerifiedImageWriterAndroidTest {
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
     }
 
-    @Test fun attachedImageBlocksPermanentPurgePreviewAfterTrashAndReopen() = runBlocking {
+    @Test fun attachedImagePurgeReleasesOwnerButPreservesOriginalAfterReopen() = runBlocking {
         val (note, page) = noteAndPage()
         val asset = imageAsset()
         val element = id()
         repo.insertVerifiedImage(command(note, page, asset.id, element))
-        val originalElement = db.elementDao().findById(element)!!
-        val originalEdge = db.assetOwnershipDao().findElementReference(element)!!
         val originalAsset = db.assetDao().findById(asset.id)!!
         val originalBytes = File(root, asset.relativePath).readBytes()
         val batch = RoomLibraryTrashRepository(db, clock = { 3_000L }).trashNote(note)
         reopen()
-        val failure = runCatching {
-            RoomLibraryTrashRepository(db, clock = { 3_000L }).previewPurge(batch)
-        }.exceptionOrNull()
-        assertTrue(failure is LibraryOperationException && failure.code == LibraryErrorCode.UNSUPPORTED_CONTENT)
-        val trashed = db.noteDao().findById(note)!!
-        assertEquals(batch, trashed.deletionBatchId)
-        assertTrue(trashed.deletedAtMillis != null)
-        assertEquals(1L, trashed.revision)
-        assertEquals(originalElement, db.elementDao().findById(element))
-        assertEquals(originalEdge, db.assetOwnershipDao().findElementReference(element))
+
+        // Confirmed purge is now supported for matching indexed media owners.
+        val trash = RoomLibraryTrashRepository(db, clock = { 3_000L })
+        val preview = trash.previewPurge(batch)
+        assertEquals(1, preview.noteCount)
+        assertEquals(1, preview.pageCount)
+        assertEquals(1, preview.elementCount)
+        assertEquals(asset.id, db.assetOwnershipDao().findElementReference(element)?.assetId)
+        trash.purgeBatch(preview)
+        assertNull(db.noteDao().findById(note))
+        assertNull(db.pageDao().findById(page))
+        assertNull(db.elementDao().findById(element))
+        assertNull(db.assetOwnershipDao().findElementReference(element))
         assertEquals(originalAsset, db.assetDao().findById(asset.id))
         assertTrue(originalBytes.contentEquals(File(root, asset.relativePath).readBytes()))
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+        reopen()
+        assertNull(db.noteDao().findById(note))
+        assertNull(db.assetOwnershipDao().findElementReference(element))
+        assertEquals(originalAsset, db.assetDao().findById(asset.id))
+        assertTrue(originalBytes.contentEquals(File(root, asset.relativePath).readBytes()))
     }
 
     @Test fun unconfiguredWriterRejectsAndGenericImageInsertionRemainsBlocked() = runBlocking {
