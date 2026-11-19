@@ -270,4 +270,51 @@ class RoomLibraryPermanentPurgeTest {
         assertEquals(1, db.pageDao().countByNote(note.id))
         assertFkClean()
     }
+    /** STO-08 B1: a projection edge blocks purge even when canonical JSON appears asset-free. */
+    @Test fun p11_indexedOwnerBlocksAssetFreeCanonicalPurge() = runBlocking {
+        val book = repos.notebooks.create("B1 indexed owner")
+        val note = repos.noteLifecycle().createNote(book.id, "B1 protected")
+        val page = db.pageDao().listByNote(note.id).single()
+        val assetId = UUID.randomUUID().toString()
+        val digest = UUID.randomUUID().toString().replace("-", "") +
+            UUID.randomUUID().toString().replace("-", "")
+        db.assetDao().insert(com.notebook.app.data.local.entity.AssetEntity(
+            assetId, digest, "image/png", 16L,
+            "assets/${digest.take(2)}/${digest.substring(2, 4)}/$digest.png", "finalized"
+        ))
+        db.assetOwnershipDao().insertPageReference(
+            com.notebook.app.data.local.entity.PageAssetReferenceEntity(page.id, assetId)
+        )
+        val batch = repos.trash.trashNote(note.id)
+        expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) { repos.trash.previewPurge(batch) }
+        assertNotNull(db.noteDao().findById(note.id))
+        assertNotNull(db.assetDao().findById(assetId))
+        assertEquals(assetId, db.assetOwnershipDao().findPageReference(page.id)?.assetId)
+        assertFkClean()
+    }
+
+    /** STO-08 B1: no stale preview can authorize purge after an owner edge appears. */
+    @Test fun p12_newOwnerAfterPreviewBlocksPurgeAndKeepsMetadata() = runBlocking {
+        val book = repos.notebooks.create("B1 stale preview")
+        val note = repos.noteLifecycle().createNote(book.id, "B1 retained")
+        val page = db.pageDao().listByNote(note.id).single()
+        val batch = repos.trash.trashNote(note.id)
+        val preview = repos.trash.previewPurge(batch)
+        val assetId = UUID.randomUUID().toString()
+        val digest = UUID.randomUUID().toString().replace("-", "") +
+            UUID.randomUUID().toString().replace("-", "")
+        db.assetDao().insert(com.notebook.app.data.local.entity.AssetEntity(
+            assetId, digest, "image/png", 16L,
+            "assets/${digest.take(2)}/${digest.substring(2, 4)}/$digest.png", "finalized"
+        ))
+        db.assetOwnershipDao().insertPageReference(
+            com.notebook.app.data.local.entity.PageAssetReferenceEntity(page.id, assetId)
+        )
+        expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) { repos.trash.purgeBatch(preview) }
+        assertNotNull(db.noteDao().findById(note.id))
+        assertNotNull(db.pageDao().findById(page.id))
+        assertNotNull(db.assetDao().findById(assetId))
+        assertEquals(assetId, db.assetOwnershipDao().findPageReference(page.id)?.assetId)
+        assertFkClean()
+    }
 }
