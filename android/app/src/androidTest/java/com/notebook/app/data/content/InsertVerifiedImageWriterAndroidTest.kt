@@ -10,6 +10,7 @@ import com.notebook.app.data.content.impl.matchesVerifiedImageMetadata
 import com.notebook.app.data.assets.ManagedAssetFileStore
 import com.notebook.app.data.assets.ManagedAssetRegistrar
 import com.notebook.app.data.library.impl.RoomLibraryTrashRepository
+import com.notebook.app.data.library.impl.LibraryRepositoryFactory
 import com.notebook.app.data.content.impl.RoomDocumentRepository
 import com.notebook.app.data.content.model.DocumentEdit
 import com.notebook.app.data.content.model.ImageFrame
@@ -192,6 +193,42 @@ class InsertVerifiedImageWriterAndroidTest {
         assertNotNull(db.assetDao().findById(second.id))
         reopen()
         assertEquals(first.id, db.assetOwnershipDao().findElementReference(element)?.assetId)
+    }
+
+    @Test fun configuredFactoryDocumentsCanInsertAndReplaceVerifiedImages() = runBlocking {
+        val (note, page) = noteAndPage()
+        val first = imageAsset()
+        val second = imageAsset(Color.rgb(128, 50, 180))
+        val element = id()
+        val documents = LibraryRepositoryFactory(db, root).documents
+
+        assertEquals(1L, documents.insertVerifiedImage(
+            command(note, page, first.id, element)).revision)
+        assertEquals(first.id, db.assetOwnershipDao().findElementReference(element)?.assetId)
+        assertEquals(2L, documents.replaceVerifiedImage(
+            command(note, page, second.id, element, rev = 1L)).revision)
+        assertEquals(second.id, db.assetOwnershipDao().findElementReference(element)?.assetId)
+        assertNotNull(db.assetDao().findById(first.id))
+        assertNotNull(db.assetDao().findById(second.id))
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+        reopen()
+        assertEquals(second.id, db.assetOwnershipDao().findElementReference(element)?.assetId)
+    }
+
+    @Test fun unconfiguredFactoryRejectsVerifiedImageWithoutWrites() = runBlocking {
+        val (note, page) = noteAndPage()
+        val asset = imageAsset()
+        val element = id()
+        val documents = LibraryRepositoryFactory(db).documents
+        val failure = runCatching {
+            documents.insertVerifiedImage(command(note, page, asset.id, element))
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT,
+            (failure as LibraryOperationException).code)
+        assertNull(db.elementDao().findById(element))
+        assertNull(db.assetOwnershipDao().findElementReference(element))
+        assertEquals(0L, db.noteDao().findById(note)!!.revision)
     }
 
     @Test fun staleExpectedRevisionRejectsWithoutElementOrEdge() = runBlocking {
