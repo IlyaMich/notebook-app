@@ -248,8 +248,12 @@ class RoomLibraryPermanentPurgeTest {
         expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) { repos.trash.previewPurge(batch) }
         val bad = db.elementDao().findById(id)!!
         db.elementDao().update(bad.copy(elementJson = "not json"))
-        expectError(LibraryErrorCode.INVALID_INPUT) { repos.trash.previewPurge(batch) }
+        // Unresolved media-like content must fail closed before any purge writes.
+        // STO-08 classifies it as unsupported ownership, not ordinary invalid input.
+        expectError(LibraryErrorCode.UNSUPPORTED_CONTENT) { repos.trash.previewPurge(batch) }
         assertNotNull(db.noteDao().findById(note.id))
+        assertNotNull(db.pageDao().findById(page.id))
+        assertNotNull(db.elementDao().findById(id))
         assertFkClean()
     }
 
