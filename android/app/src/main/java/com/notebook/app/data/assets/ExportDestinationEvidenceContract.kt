@@ -3,7 +3,8 @@ package com.notebook.app.data.assets
 import java.util.UUID
 
 /**
- * R26-A: pure, in-memory review of CLAIMED unsealed destination observations.
+ * R30-A: provenance-consistent, in-memory review of CLAIMED unsealed observations.
+ * Independent expectations still come from the caller, NOT a trusted source or manifest.
  * No filesystem, Room, lease, production wiring, sealing, receipt or permission to release holds.
  * Caller-supplied sync flags and hashes are assertions, not independently proven durability.
  */
@@ -22,8 +23,25 @@ internal object ExportDestinationEvidenceContract {
         val parentSyncClaimed: Boolean,
     )
 
+    /** Caller-supplied reference identity; no source authenticity is attested here. */
+    internal data class ProvenanceExpectation(
+        val operationId: UUID,
+        val noteId: String,
+        val noteRevision: Long,
+        val snapshotSha256: String,
+    )
+
+    /** Untrusted observation of the identity claimed by a destination producer. */
+    internal data class ObservedProvenance(
+        val operationId: UUID,
+        val noteId: String,
+        val noteRevision: Long,
+        val snapshotSha256: String?,
+    )
+
     internal data class Claim(
         val operationId: UUID,
+        val observedProvenance: ObservedProvenance?,
         val expectedSnapshotSha256: String,
         val observedSnapshotSha256: String?,
         val expectedManifestSha256: String,
@@ -39,6 +57,7 @@ internal object ExportDestinationEvidenceContract {
     internal enum class Reason {
         CANCELLED, INVALID_EXPECTATION, DUPLICATE_ASSET, INCOMPLETE_COPY_SET,
         BYTES_MISMATCH, INCOMPLETE_SYNC_CLAIMS,
+        MISSING_PROVENANCE, INVALID_PROVENANCE, PROVENANCE_MISMATCH,
     }
 
     internal sealed interface Assessment {
@@ -51,10 +70,30 @@ internal object ExportDestinationEvidenceContract {
     private const val MAX_COPIES = 1024
     private const val MAX_AGGREGATE_BYTES = 1L shl 34 // contract budget, not a writer quota
 
-    fun assess(claim: Claim): Assessment {
+    /** No one-argument overload: every assessment must bind to a separate expectation. */
+    fun assess(expectation: ProvenanceExpectation, claim: Claim): Assessment {
         if (claim.cancelled) return Assessment.Rejected(Reason.CANCELLED)
-        if (!validDigest(claim.expectedSnapshotSha256) ||
-            !validDigest(claim.expectedManifestSha256) ||
+        if (!canonicalId(expectation.noteId) || expectation.noteRevision < 0L ||
+            !validDigest(expectation.snapshotSha256)
+        ) return Assessment.Rejected(Reason.INVALID_PROVENANCE)
+        val observed = claim.observedProvenance
+            ?: return Assessment.Rejected(Reason.MISSING_PROVENANCE)
+        val observedDigest = observed.snapshotSha256
+            ?: return Assessment.Rejected(Reason.MISSING_PROVENANCE)
+        if (!canonicalId(observed.noteId) || observed.noteRevision < 0L ||
+            !validDigest(observedDigest)
+        ) return Assessment.Rejected(Reason.INVALID_PROVENANCE)
+        if (!validDigest(claim.expectedSnapshotSha256)) {
+            return Assessment.Rejected(Reason.INVALID_EXPECTATION)
+        }
+        if (expectation.operationId != claim.operationId ||
+            expectation.operationId != observed.operationId ||
+            expectation.noteId != observed.noteId ||
+            expectation.noteRevision != observed.noteRevision ||
+            expectation.snapshotSha256 != claim.expectedSnapshotSha256 ||
+            expectation.snapshotSha256 != observedDigest
+        ) return Assessment.Rejected(Reason.PROVENANCE_MISMATCH)
+        if (!validDigest(claim.expectedManifestSha256) ||
             claim.expectedCopies.size > MAX_COPIES || claim.observedCopies.size > MAX_COPIES
         ) return Assessment.Rejected(Reason.INVALID_EXPECTATION)
 
@@ -94,4 +133,9 @@ internal object ExportDestinationEvidenceContract {
     }
 
     private fun validDigest(value: String) = SHA256.matches(value)
+    private fun canonicalId(value: String): Boolean = try {
+        UUID.fromString(value).toString() == value
+    } catch (_: IllegalArgumentException) {
+        false
+    }
 }
