@@ -359,6 +359,106 @@ class AssetOwnershipTransactionBoundaryAndroidTest {
         gateUnverified()
     }
 
+    @Test fun removingPdfImagePageReleasesEdgesButRetainsOriginalAssets() = runBlocking {
+        val pdf = asset("application/pdf")
+        val image = asset("image/png")
+        val owner = mediaOwner(pdf, image)
+        val repo = RoomDocumentRepository(db)
+
+        val commit = repo.commitIfRevision(owner.noteId, 0L,
+            DocumentEdit.RemovePage(owner.pageId))
+        assertEquals(1L, commit.revision)
+        assertEquals(null, db.pageDao().findById(owner.pageId))
+        assertEquals(null, db.elementDao().findById(owner.imageElementId))
+        assertEquals(null, db.elementDao().findById(owner.textElementId))
+        assertEquals(null, db.assetOwnershipDao().findPageReference(owner.pageId))
+        assertEquals(null, db.assetOwnershipDao().findElementReference(owner.imageElementId))
+        assertEquals(listOf(owner.secondPageId),
+            db.pageDao().listByNote(owner.noteId).map { it.id })
+        assertNotNull(db.assetDao().findById(pdf))
+        assertNotNull(db.assetDao().findById(image))
+        assertEquals(2, db.assetDao().countAll())
+        gateUnverified()
+        db.openHelper.writableDatabase.query("PRAGMA foreign_key_check").use {
+            assertEquals(0, it.count)
+        }
+    }
+
+    @Test fun mismatchedPdfOwnerRejectsPageRemovalWithoutChangingAnyEdge() = runBlocking {
+        val pdf = asset("application/pdf")
+        val otherPdf = asset("application/pdf")
+        val image = asset("image/png")
+        val owner = mediaOwner(pdf, image)
+        val beforePage = db.pageDao().findById(owner.pageId)!!
+        check(db.pageDao().update(beforePage.copy(backgroundJson = pdfJson(otherPdf))) == 1)
+        val repo = RoomDocumentRepository(db)
+        val before = repo.load(owner.noteId)
+
+        val failure = runCatching {
+            repo.commitIfRevision(owner.noteId, 0L, DocumentEdit.RemovePage(owner.pageId))
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT,
+            (failure as LibraryOperationException).code)
+        assertEquals(before, repo.load(owner.noteId))
+        assertEquals(PageAssetReferenceEntity(owner.pageId, pdf),
+            db.assetOwnershipDao().findPageReference(owner.pageId))
+        assertEquals(ElementAssetReferenceEntity(owner.imageElementId, image),
+            db.assetOwnershipDao().findElementReference(owner.imageElementId))
+        assertEquals(0L, db.noteDao().findById(owner.noteId)!!.revision)
+        gateUnverified()
+    }
+
+    @Test fun mismatchedImageOwnerPreventsReleasingPdfPageOwner() = runBlocking {
+        val pdf = asset("application/pdf")
+        val image = asset("image/png")
+        val otherImage = asset("image/png")
+        val owner = mediaOwner(pdf, image)
+        val row = db.elementDao().findById(owner.imageElementId)!!
+        check(db.elementDao().update(row.copy(
+            elementJson = imageJson(owner.imageElementId, otherImage))) == 1)
+        val repo = RoomDocumentRepository(db)
+        val before = repo.load(owner.noteId)
+        val failure = runCatching {
+            repo.commitIfRevision(owner.noteId, 0L, DocumentEdit.RemovePage(owner.pageId))
+        }.exceptionOrNull()
+
+        assertTrue(failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT,
+            (failure as LibraryOperationException).code)
+        assertEquals(before, repo.load(owner.noteId))
+        assertEquals(PageAssetReferenceEntity(owner.pageId, pdf),
+            db.assetOwnershipDao().findPageReference(owner.pageId))
+        assertEquals(ElementAssetReferenceEntity(owner.imageElementId, image),
+            db.assetOwnershipDao().findElementReference(owner.imageElementId))
+        assertEquals(0L, db.noteDao().findById(owner.noteId)!!.revision)
+        gateUnverified()
+    }
+
+    @Test fun removingOneOfTwoPagesSharingImageRetainsOtherOwnerAndMetadata() = runBlocking {
+        val pdf = asset("application/pdf")
+        val image = asset("image/png")
+        val owner = mediaOwner(pdf, image)
+        val secondImageId = id()
+        db.elementDao().insert(ElementEntity(
+            secondImageId, owner.secondPageId, 0L, "image",
+            imageJson(secondImageId, image), 0L,
+        ))
+        db.assetOwnershipDao().insertElementReference(
+            ElementAssetReferenceEntity(secondImageId, image))
+        val repo = RoomDocumentRepository(db)
+
+        assertEquals(1L, repo.commitIfRevision(owner.noteId, 0L,
+            DocumentEdit.RemovePage(owner.pageId)).revision)
+        assertEquals(null, db.assetOwnershipDao().findElementReference(owner.imageElementId))
+        assertEquals(ElementAssetReferenceEntity(secondImageId, image),
+            db.assetOwnershipDao().findElementReference(secondImageId))
+        assertEquals(owner.secondPageId, db.elementDao().findById(secondImageId)!!.pageId)
+        assertNotNull(db.assetDao().findById(image))
+        assertEquals(2, db.assetDao().countAll())
+        gateUnverified()
+    }
+
     @Test fun inconsistentNonMediaOwnerEdgeBlocksPageDeletionWithoutPartialCommit() = runBlocking {
         val (noteId, pageId) = blankOwner()
         val extraPageId = id()
