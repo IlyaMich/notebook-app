@@ -466,11 +466,13 @@ class RoomDocumentRepository private constructor(
             if (ids.isEmpty()) false else {
                 val selected = requireSelected(source, ids)
                 if (selected.any(::isLocked)) fail(LibraryErrorCode.PROTECTED_ENTITY, "Locked element cannot move")
-                // Image/PDF asset-backed content is never moved until references are implemented.
-                if (selected.any(::isImageContent)) {
-                    fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image transfer requires asset management")
+                // A page move preserves the element's global identity and its
+                // existing owner edge; no new asset attachment or file access occurs.
+                // Validate each edge before changing either page's element order.
+                for (row in selected) {
+                    if (isImageContent(row)) verifiedImageOwnerAssetId(row)
+                    else rejectIndexedElementEdges(listOf(row))
                 }
-                rejectIndexedElementEdges(selected)
                 val movingInRenderOrder = source.filter { it.id in ids.toSet() }
                 movingInRenderOrder.forEachIndexed { index, row ->
                     check(db.elementDao().update(row.copy(
@@ -619,11 +621,11 @@ class RoomDocumentRepository private constructor(
     }
 
     /**
-     * Release only an unambiguously matched persisted image owner. This does not
-     * establish reference-index completeness or eligibility for filesystem GC.
-     * The caller must be inside the document revision's Room transaction.
+     * Validate an existing image's authoritative canonical owner and indexed edge.
+     * Page transfer preserves the global element ID and leaves this edge unchanged.
+     * This does not certify ownership-index completeness, physical bytes or GC.
      */
-    private suspend fun releaseVerifiedImageOwner(row: ElementEntity) {
+    private suspend fun verifiedImageOwnerAssetId(row: ElementEntity): String {
         val parsed = try {
             JSONObject(row.elementJson)
         } catch (_: org.json.JSONException) {
@@ -670,7 +672,13 @@ class RoomDocumentRepository private constructor(
         if (edge.assetId != assetId ||
             db.assetDao().findById(assetId)?.state != "finalized"
         ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image owner and reference disagree")
-        if (dao.removeElementReferenceIfMatches(row.id, assetId) != 1) {
+        return assetId
+    }
+
+    /** Ownership release and element deletion must occur in one Room transaction. */
+    private suspend fun releaseVerifiedImageOwner(row: ElementEntity) {
+        val assetId = verifiedImageOwnerAssetId(row)
+        if (db.assetOwnershipDao().removeElementReferenceIfMatches(row.id, assetId) != 1) {
             fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image owner reference changed")
         }
     }
