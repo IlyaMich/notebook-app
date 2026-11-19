@@ -137,6 +137,28 @@ class Sto08AssetBackedNoteDuplicationAndroidTest {
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
     }
 
+    @Test fun permanentlyPurgingCloneKeepsOriginalIndexedOwners() = runBlocking {
+        val f = mediaFixture()
+        val repos = LibraryRepositoryFactory(db)
+        val clone = repos.noteLifecycle().duplicateNote(f.noteId)
+        val copyPage = db.pageDao().listByNote(clone.id).single()
+        val copyElement = db.elementDao().listByPage(copyPage.id).single()
+        val batch = repos.trash.trashNote(clone.id)
+        repos.trash.purgeBatch(repos.trash.previewPurge(batch))
+
+        assertNull(db.noteDao().findById(clone.id))
+        assertNull(db.assetOwnershipDao().findPageReference(copyPage.id))
+        assertNull(db.assetOwnershipDao().findElementReference(copyElement.id))
+        assertNotNull(db.noteDao().findById(f.noteId))
+        assertEquals(PageAssetReferenceEntity(f.pageId, f.pdfId),
+            db.assetOwnershipDao().findPageReference(f.pageId))
+        assertEquals(ElementAssetReferenceEntity(f.elementId, f.imageId),
+            db.assetOwnershipDao().findElementReference(f.elementId))
+        assertEquals(2, db.assetDao().countAll())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+        foreignKeysValid()
+    }
+
     @Test fun missingImageOwnerProjectionRollsBackEntireDuplicate() = runBlocking {
         val f = mediaFixture()
         check(db.assetOwnershipDao().removeElementReferenceIfMatches(f.elementId, f.imageId) == 1)
