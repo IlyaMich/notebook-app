@@ -668,7 +668,7 @@ class RoomDocumentRepository private constructor(
             ?: fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF page owner has no indexed reference")
         val asset = db.assetDao().findById(assetId)
         if (edge.assetId != assetId || asset?.state != "finalized" ||
-            asset.mimeType != "application/pdf"
+            asset?.mimeType != "application/pdf"
         ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF owner and reference disagree")
         return assetId
     }
