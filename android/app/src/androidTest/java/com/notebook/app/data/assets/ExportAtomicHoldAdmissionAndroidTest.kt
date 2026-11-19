@@ -133,4 +133,45 @@ class ExportAtomicHoldAdmissionAndroidTest {
         assertEquals(1 to 0, count())
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
     }
+    /** B6: two retained holds survive a synthetic deleted-note state and Room reopen. */
+    @Test fun twoIndependentHoldsSurviveDeletedNoteStateAndDatabaseReopen() = runBlocking {
+        val asset = addImage()
+        val first = id()
+        val second = id()
+        assertEquals(ExportAtomicHoldResult.Committed(first, listOf(asset)), persist(first))
+        assertEquals(ExportAtomicHoldResult.Committed(second, listOf(asset)), persist(second))
+        assertEquals(2 to 2, count())
+        val beforeAsset = db.assetDao().findById(asset)
+        val beforeEdge = db.assetOwnershipDao().listElementReferencesByAsset(asset)
+        val note = db.noteDao().findById(noteId)!!
+        assertEquals(1, db.noteDao().update(note.copy(deletedAtMillis = 4L)))
+        assertEquals(2 to 2, count())
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        assertEquals(listOf(asset), db.exportHoldAdmissionDao().listHolds(first).map { it.assetId })
+        assertEquals(listOf(asset), db.exportHoldAdmissionDao().listHolds(second).map { it.assetId })
+        assertEquals(beforeAsset, db.assetDao().findById(asset))
+        assertEquals(beforeEdge, db.assetOwnershipDao().listElementReferencesByAsset(asset))
+        assertEquals(4L, db.noteDao().findById(noteId)!!.deletedAtMillis)
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    /** B6: failed new admission must not revoke a pre-existing committed export hold. */
+    @Test fun rejectedLaterExportCannotReleaseExistingHold() = runBlocking {
+        val asset = addImage()
+        val committedOp = id()
+        assertEquals(ExportAtomicHoldResult.Committed(committedOp, listOf(asset)), persist(committedOp))
+        val beforeAsset = db.assetDao().findById(asset)
+        val note = db.noteDao().findById(noteId)!!
+        assertEquals(1, db.noteDao().update(note.copy(deletedAtMillis = 4L)))
+        assertEquals(
+            ExportAtomicHoldResult.Rejected(SnapshotRejection.INELIGIBLE_NOTE), persist(id())
+        )
+        assertEquals(1 to 1, count())
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        assertEquals(listOf(asset), db.exportHoldAdmissionDao().listHolds(committedOp).map { it.assetId })
+        assertEquals(beforeAsset, db.assetDao().findById(asset))
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
 }
