@@ -98,6 +98,82 @@ class RoomDocumentRepository private constructor(
         }
     }
 
+    /**
+     * Verified image-to-image replacement. A newly selected asset is fully
+     * inspected under its publication/acquisition lease before the Room edit.
+     * The previous owner edge, element JSON and note revision change atomically.
+     * No asset bytes or metadata are reclaimed, including the previous original.
+     */
+    internal suspend fun replaceVerifiedImage(command: InsertVerifiedImageCommand): DocumentCommit {
+        val request = command.validated()
+        val root = verifiedImageRoot ?: fail(
+            LibraryErrorCode.UNSUPPORTED_CONTENT, "Verified image writer is not configured"
+        )
+        return RegisteredFinalizedImageDecoder(root, db.assetDao())
+            .withInspectedAssetLease(request.assetId) { verified ->
+                currentCoroutineContext().ensureActive()
+                replaceVerifiedImageInTransaction(request, verified)
+            }
+    }
+
+    private suspend fun replaceVerifiedImageInTransaction(
+        request: ValidatedInsertVerifiedImage,
+        verified: VerifiedDecodedImageInfo,
+    ): DocumentCommit = db.withTransaction {
+        currentCoroutineContext().ensureActive()
+        val note = db.noteDao().findById(request.noteId)
+            ?: fail(LibraryErrorCode.NOT_FOUND, "Image target note not found")
+        if (note.revision != request.expectedNoteRevision) {
+            fail(LibraryErrorCode.INVALID_INPUT, "Stale image replacement")
+        }
+        if (note.deletedAtMillis != null || note.revision == Long.MAX_VALUE) {
+            fail(LibraryErrorCode.INACTIVE_OWNER, "Image target is inactive")
+        }
+        val notebook = db.notebookDao().findById(note.notebookId)
+            ?: fail(LibraryErrorCode.INACTIVE_OWNER, "Image notebook missing")
+        if (notebook.deletedAtMillis != null) {
+            fail(LibraryErrorCode.INACTIVE_OWNER, "Image notebook is in Trash")
+        }
+        if (db.assetOwnershipDao().readFailClosedGateStatus() != "UNVERIFIED") {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image ownership gate rejects replacement")
+        }
+        val page = db.pageDao().findById(request.pageId)
+            ?: fail(LibraryErrorCode.NOT_FOUND, "Image page not found")
+        if (page.noteId != note.id) {
+            fail(LibraryErrorCode.NOT_FOUND, "Image page does not belong to note")
+        }
+        val old = db.elementDao().findById(request.elementId)
+            ?: fail(LibraryErrorCode.NOT_FOUND, "Image element not found")
+        if (old.pageId != page.id || !isImageContent(old)) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image target identity mismatch")
+        }
+        if (isLocked(old)) {
+            fail(LibraryErrorCode.PROTECTED_ENTITY, "Locked image cannot be replaced")
+        }
+        val oldAssetId = verifiedImageOwnerAssetId(old)
+        val asset = db.assetDao().findById(request.assetId)
+            ?: fail(LibraryErrorCode.NOT_FOUND, "Verified image metadata disappeared")
+        if (!matchesVerifiedImageMetadata(asset, verified)) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Verified image metadata changed")
+        }
+        val nextJson = canonicalImageJson(request)
+        if (nextJson == old.elementJson) {
+            return@withTransaction DocumentCommit(note.id, note.revision, note.updatedAtMillis)
+        }
+        val nextRevision = note.revision + 1L
+        if (oldAssetId != request.assetId &&
+            db.assetOwnershipDao().changeElementAssetIfMatches(
+                old.id, oldAssetId, request.assetId
+            ) != 1
+        ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image owner reference changed")
+        check(db.elementDao().update(old.copy(elementJson = nextJson, revision = nextRevision)) == 1)
+        currentCoroutineContext().ensureActive()
+        val now = maxOf(clock(), note.updatedAtMillis)
+        check(db.noteDao().update(note.copy(revision = nextRevision, updatedAtMillis = now)) == 1)
+        currentCoroutineContext().ensureActive()
+        DocumentCommit(note.id, nextRevision, now)
+    }
+
     private suspend fun insertVerifiedImageInTransaction(
         request: ValidatedInsertVerifiedImage,
         verified: VerifiedDecodedImageInfo,
