@@ -133,6 +133,104 @@ class ExportAtomicHoldAdmissionAndroidTest {
         assertEquals(1 to 0, count())
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
     }
+    @Test fun oneLeaseProtectsCaptureCommitAndObservedSources() = runBlocking {
+        val first = addImage()
+        val second = addImage()
+        var depth = 0
+        var enters = 0
+        var inspections = 0
+        val shared = object : ExportOuterLease {
+            override suspend fun <T> withLease(action: suspend () -> T): T {
+                check(depth == 0) { "Nested shared lease" }
+                depth++
+                enters++
+                return try { action() } finally { depth-- }
+            }
+        }
+        val coordinator = ExportRetainedSourceInspectionCoordinator(
+            shared, ExportAtomicHoldAdmission(db, shared),
+            inspectSource = { plan ->
+                assertEquals(1, depth)
+                inspections++
+                ExportVerifiedSourceObservation(plan.images.map {
+                    VerifiedDecodedImageInfo(it.id, it.mimeType, it.sha256,
+                        it.encodedBytes, 1, 1, 1L)
+                }, plan.totalEncodedBytes)
+            },
+        )
+        val op = id()
+        val result = coordinator.inspectAndRetain(op, SnapshotRequest(noteId, limits), admission, 44L)
+        assertTrue(result is ExportRetainedSourceInspectionCoordinator.Result.SourceObserved)
+        assertEquals(1, enters)
+        assertEquals(1, inspections)
+        assertEquals(0, depth)
+        assertEquals(listOf(first, second).sorted(),
+            db.exportHoldAdmissionDao().listHolds(op).map { it.assetId })
+        assertEquals(1 to 2, count())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun failedInspectionRetainsBothPinsAfterRoomReopen() = runBlocking {
+        val first = addImage()
+        val second = addImage()
+        val shared = object : ExportOuterLease {
+            override suspend fun <T> withLease(action: suspend () -> T): T = action()
+        }
+        val coordinator = ExportRetainedSourceInspectionCoordinator(
+            shared, ExportAtomicHoldAdmission(db, shared),
+            inspectSource = { throw java.io.IOException("simulated source verification failure") },
+        )
+        val op = id()
+        assertTrue(runCatching {
+            coordinator.inspectAndRetain(op, SnapshotRequest(noteId, limits), admission, 44L)
+        }.exceptionOrNull() is java.io.IOException)
+        assertEquals(1 to 2, count())
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        assertEquals(listOf(first, second).sorted(),
+            db.exportHoldAdmissionDao().listHolds(op).map { it.assetId })
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun ineligibleNoteNeverCommitsHoldOrInspectsBytes() = runBlocking {
+        addImage()
+        val row = db.noteDao().findById(noteId)!!
+        db.noteDao().update(row.copy(deletedAtMillis = 7L))
+        var inspections = 0
+        val shared = object : ExportOuterLease {
+            override suspend fun <T> withLease(action: suspend () -> T): T = action()
+        }
+        val coordinator = ExportRetainedSourceInspectionCoordinator(
+            shared, ExportAtomicHoldAdmission(db, shared),
+            inspectSource = { inspections++; error("No inspection expected") },
+        )
+        assertEquals(
+            ExportRetainedSourceInspectionCoordinator.Result.Rejected(SnapshotRejection.INELIGIBLE_NOTE),
+            coordinator.inspectAndRetain(id(), SnapshotRequest(noteId, limits), admission, 44L),
+        )
+        assertEquals(0, inspections)
+        assertEquals(0 to 0, count())
+    }
+
+    @Test fun inconsistentSourceObservationFailsAndLeavesPins() = runBlocking {
+        val asset = addImage()
+        val shared = object : ExportOuterLease {
+            override suspend fun <T> withLease(action: suspend () -> T): T = action()
+        }
+        val coordinator = ExportRetainedSourceInspectionCoordinator(
+            shared, ExportAtomicHoldAdmission(db, shared),
+            inspectSource = { plan ->
+                ExportVerifiedSourceObservation(emptyList(), plan.totalEncodedBytes)
+            },
+        )
+        val op = id()
+        assertTrue(runCatching {
+            coordinator.inspectAndRetain(op, SnapshotRequest(noteId, limits), admission, 44L)
+        }.exceptionOrNull() is java.io.IOException)
+        assertEquals(listOf(asset), db.exportHoldAdmissionDao().listHolds(op).map { it.assetId })
+        assertEquals(1 to 1, count())
+    }
+
     /** B6: two retained holds survive a synthetic deleted-note state and Room reopen. */
     @Test fun twoIndependentHoldsSurviveDeletedNoteStateAndDatabaseReopen() = runBlocking {
         val asset = addImage()
