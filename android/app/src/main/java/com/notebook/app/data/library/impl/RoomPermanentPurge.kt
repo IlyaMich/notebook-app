@@ -138,7 +138,7 @@ internal class RoomPermanentPurge(private val db: AppDatabase) {
                                 ?: fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image missing owner reference")
                             val asset = db.assetDao().findById(finding.assetId)
                             if (edge.assetId != finding.assetId || asset?.state != "finalized" ||
-                                asset.mimeType !in setOf("image/png", "image/jpeg")
+                                asset?.mimeType !in setOf("image/png", "image/jpeg")
                             ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image ownership mismatch")
                             elementOwnersToRelease[element.id] = finding.assetId
                             identity.add("ER|${element.id}|${finding.assetId}")
