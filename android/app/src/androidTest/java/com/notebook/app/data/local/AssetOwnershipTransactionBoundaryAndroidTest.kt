@@ -359,6 +359,77 @@ class AssetOwnershipTransactionBoundaryAndroidTest {
         gateUnverified()
     }
 
+    @Test fun replacingPdfBackgroundWithBlankReleasesOnlyPageOwner() = runBlocking {
+        val pdf = asset("application/pdf")
+        val image = asset("image/png")
+        val owner = mediaOwner(pdf, image)
+        val blank = """{"type":"blank","color":"#FFFFFF"}"""
+        val repo = RoomDocumentRepository(db)
+
+        val commit = repo.commitIfRevision(owner.noteId, 0L,
+            DocumentEdit.ChangeBackground(owner.pageId, blank))
+        assertEquals(1L, commit.revision)
+        assertEquals(blank, db.pageDao().findById(owner.pageId)!!.backgroundJson)
+        assertEquals(null, db.assetOwnershipDao().findPageReference(owner.pageId))
+        assertEquals(ElementAssetReferenceEntity(owner.imageElementId, image),
+            db.assetOwnershipDao().findElementReference(owner.imageElementId))
+        assertNotNull(db.assetDao().findById(pdf))
+        assertNotNull(db.assetDao().findById(image))
+        assertEquals(2, db.assetDao().countAll())
+        gateUnverified()
+        db.openHelper.writableDatabase.query("PRAGMA foreign_key_check").use {
+            assertEquals(0, it.count)
+        }
+    }
+
+    @Test fun mismatchedPdfReferenceBlocksBackgroundReplacementWithoutAnyRelease() = runBlocking {
+        val pdf = asset("application/pdf")
+        val replacement = asset("application/pdf")
+        val image = asset("image/png")
+        val owner = mediaOwner(pdf, image)
+        val old = db.pageDao().findById(owner.pageId)!!
+        check(db.pageDao().update(old.copy(backgroundJson = pdfJson(replacement))) == 1)
+        val repo = RoomDocumentRepository(db)
+        val before = repo.load(owner.noteId)
+
+        val failure = runCatching {
+            repo.commitIfRevision(owner.noteId, 0L,
+                DocumentEdit.ChangeBackground(owner.pageId,
+                    """{"type":"blank","color":"#FFFFFF"}"""))
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT,
+            (failure as LibraryOperationException).code)
+        assertEquals(before, repo.load(owner.noteId))
+        assertEquals(PageAssetReferenceEntity(owner.pageId, pdf),
+            db.assetOwnershipDao().findPageReference(owner.pageId))
+        assertEquals(ElementAssetReferenceEntity(owner.imageElementId, image),
+            db.assetOwnershipDao().findElementReference(owner.imageElementId))
+        assertEquals(0L, db.noteDao().findById(owner.noteId)!!.revision)
+        gateUnverified()
+    }
+
+    @Test fun missingPdfProjectionBlocksBackgroundReplacement() = runBlocking {
+        val pdf = asset("application/pdf")
+        val image = asset("image/png")
+        val owner = mediaOwner(pdf, image)
+        check(db.assetOwnershipDao().removePageReferenceIfMatches(owner.pageId, pdf) == 1)
+        val repo = RoomDocumentRepository(db)
+        val before = repo.load(owner.noteId)
+
+        val failure = runCatching {
+            repo.commit(owner.noteId, DocumentEdit.ChangeBackground(
+                owner.pageId, """{"type":"blank","color":"#FFFFFF"}"""))
+        }.exceptionOrNull()
+        assertTrue(failure is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT,
+            (failure as LibraryOperationException).code)
+        assertEquals(before, repo.load(owner.noteId))
+        assertEquals(0L, db.noteDao().findById(owner.noteId)!!.revision)
+        assertNotNull(db.assetDao().findById(pdf))
+        gateUnverified()
+    }
+
     @Test fun removingPdfImagePageReleasesEdgesButRetainsOriginalAssets() = runBlocking {
         val pdf = asset("application/pdf")
         val image = asset("image/png")
