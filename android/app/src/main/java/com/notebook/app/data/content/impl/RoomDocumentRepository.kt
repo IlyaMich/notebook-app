@@ -287,17 +287,30 @@ class RoomDocumentRepository private constructor(
         is DocumentEdit.RemovePage -> {
             val page = ownedPage(pages, edit.id)
             if (pages.size == 1) fail(LibraryErrorCode.INVALID_INPUT, "Cannot delete the last page")
-            // Asset-aware deletes require a later reference cleanup protocol.
-            if (isPdfBackground(page.backgroundJson)) {
-                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF asset deletion is not supported")
+            // Release only validated ownership projections, never asset bytes or
+            // metadata. Page/element owner changes and the revision commit remain
+            // within the same Room transaction; any mismatch rolls everything back.
+            val pdfAssetId = verifiedPdfPageOwnerAssetId(page)
+            val elements = elementsFor(page.id)
+            for (element in elements) {
+                if (isImageContent(element)) verifiedImageOwnerAssetId(element)
+                else {
+                    val (canonicalId, kind) = CanonicalContentValidator.element(element.elementJson)
+                    if (canonicalId != element.id || kind != element.kind) {
+                        fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Inconsistent page element")
+                    }
+                    rejectIndexedElementEdges(listOf(element))
+                }
             }
-            rejectIndexedPageEdge(page.id)
-            val elements = db.elementDao().listByPage(page.id)
-            if (elements.any(::isImageContent)) {
-                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image asset deletion is not supported")
+            for (element in elements) {
+                if (isImageContent(element)) releaseVerifiedImageOwner(element)
+                check(db.elementDao().deleteById(element.id) == 1)
             }
-            rejectIndexedElementEdges(elements)
-            elements.forEach { check(db.elementDao().deleteById(it.id) == 1) }
+            if (pdfAssetId != null) {
+                if (db.assetOwnershipDao().removePageReferenceIfMatches(page.id, pdfAssetId) != 1) {
+                    fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF page reference changed")
+                }
+            }
             check(db.pageDao().deleteById(page.id) == 1)
             val remaining = db.pageDao().listByNote(noteId)
             setPageOrder(remaining, remaining.map { it.id }, revision)
@@ -618,6 +631,46 @@ class RoomDocumentRepository private constructor(
         }
         setElementOrder(db.elementDao().listByPage(page.id), desired, revision)
         return true
+    }
+
+    /**
+     * Return the indexed PDF asset if and only if the canonical page background,
+     * durable reference, and finalized asset metadata agree. Asset-free pages
+     * must also be free of unexpected indexed references.
+     *
+     * This is deletion preflight only: no PDF bytes are read or reclaimed, and
+     * this result never authorizes original-asset garbage collection.
+     */
+    private suspend fun verifiedPdfPageOwnerAssetId(page: PageEntity): String? {
+        val background = try {
+            JSONObject(page.backgroundJson)
+        } catch (_: org.json.JSONException) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Malformed page background")
+        }
+        if (background.optString("type") != "pdfPage") {
+            CanonicalContentValidator.background(page.backgroundJson)
+            rejectIndexedPageEdge(page.id)
+            return null
+        }
+        if (background.keys().asSequence().toSet() !=
+            setOf("type", "assetId", "pageIndex", "displayBox") ||
+            background.optString("displayBox") != "crop" ||
+            !background.has("pageIndex") ||
+            background.opt("pageIndex") !is Int ||
+            background.getInt("pageIndex") < 0
+        ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Invalid PDF background")
+        val assetId = try {
+            LibraryValidation.canonicalId(background.getString("assetId"))
+        } catch (_: Exception) {
+            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Invalid PDF asset ID")
+        }
+        val edge = db.assetOwnershipDao().findPageReference(page.id)
+            ?: fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF page owner has no indexed reference")
+        val asset = db.assetDao().findById(assetId)
+        if (edge.assetId != assetId || asset?.state != "finalized" ||
+            asset?.mimeType != "application/pdf"
+        ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF owner and reference disagree")
+        return assetId
     }
 
     /**
