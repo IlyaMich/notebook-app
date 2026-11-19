@@ -1,5 +1,6 @@
 package com.notebook.app.data.content.impl
 
+import com.notebook.app.data.assets.DocumentAssetReferenceInspector
 import com.notebook.app.data.content.validation.CanonicalContentValidator
 import com.notebook.app.data.library.LibraryErrorCode
 import com.notebook.app.data.library.LibraryOperationException
@@ -7,7 +8,9 @@ import com.notebook.app.data.library.LibraryValidation
 import com.notebook.app.data.library.model.InitialPageSpec
 import com.notebook.app.data.library.repository.NoteContentTransactionPort
 import com.notebook.app.data.local.AppDatabase
+import com.notebook.app.data.local.entity.ElementAssetReferenceEntity
 import com.notebook.app.data.local.entity.ElementEntity
+import com.notebook.app.data.local.entity.PageAssetReferenceEntity
 import com.notebook.app.data.local.entity.PageEntity
 import java.util.UUID
 import org.json.JSONObject
@@ -71,60 +74,129 @@ class RoomNoteContentTransactionAdapter(
         }
         requireContiguous(pages.map { it.orderIndex }, "Source page")
 
-        // Snapshot and validate ALL source content before the first clone insert.
-        // Unsupported asset-backed pages or elements abort; nothing is flattened
-        // or skipped. The outer transaction still protects against later IO/SQL errors.
+        // Snapshot every canonical owner and its matching typed projection before
+        // any target content is inserted. A missing/mismatched/unknown projection
+        // rejects the whole outer note-duplication transaction.
+        // This only shares registered originals: it does not inspect file bytes,
+        // certify the global ownership index, or authorize asset reclamation.
         val generatedIds = mutableSetOf<String>()
         val copies = pages.map { page ->
-            if (db.assetOwnershipDao().findPageReference(page.id) != null) {
-                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed page ownership cannot be cloned yet")
+            if (!page.width.isFinite() || page.width <= 0.0 ||
+                !page.height.isFinite() || page.height <= 0.0 ||
+                page.revision < 0L || page.revision > source.revision
+            ) fail(LibraryErrorCode.INVALID_INPUT, "Invalid source page metadata")
+            val pageAsset = when (val finding =
+                DocumentAssetReferenceInspector.pageBackground(page.backgroundJson)) {
+                is DocumentAssetReferenceInspector.Finding.Reference -> {
+                    requireMatchedPageOwner(page.id, finding.assetId)
+                    finding.assetId
+                }
+                DocumentAssetReferenceInspector.Finding.NoDirectReference -> {
+                    CanonicalContentValidator.page(InitialPageSpec(
+                        page.width, page.height, page.backgroundJson,
+                    ))
+                    if (db.assetOwnershipDao().findPageReference(page.id) != null) {
+                        fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Unexpected page asset projection")
+                    }
+                    null
+                }
+                is DocumentAssetReferenceInspector.Finding.Unresolved ->
+                    fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Unresolved source page background")
             }
-            CanonicalContentValidator.page(InitialPageSpec(
-                page.width, page.height, page.backgroundJson,
-            ))
             val elements = db.elementDao().listByPage(page.id)
             requireContiguous(elements.map { it.orderIndex }, "Source element")
             val copiedElements = elements.map { element ->
-                if (db.assetOwnershipDao().findElementReference(element.id) != null) {
-                    fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed element ownership cannot be cloned yet")
-                }
-                val (envelopeId, indexedKind) = CanonicalContentValidator.element(element.elementJson)
-                if (envelopeId != element.id || indexedKind != element.kind) {
-                    fail(LibraryErrorCode.INVALID_INPUT, "Stored element and canonical JSON disagree")
+                if (element.pageId != page.id ||
+                    element.revision < 0L || element.revision > source.revision
+                ) fail(LibraryErrorCode.INVALID_INPUT, "Invalid source element metadata")
+                val assetId = when (val finding =
+                    DocumentAssetReferenceInspector.element(element.elementJson)) {
+                    is DocumentAssetReferenceInspector.Finding.Reference -> {
+                        val json = JSONObject(element.elementJson)
+                        if (element.kind != "image" || json.optString("id") != element.id) {
+                            fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Indexed image owner identity mismatch")
+                        }
+                        requireMatchedElementOwner(element.id, finding.assetId)
+                        finding.assetId
+                    }
+                    DocumentAssetReferenceInspector.Finding.NoDirectReference -> {
+                        val (canonicalId, canonicalKind) =
+                            CanonicalContentValidator.element(element.elementJson)
+                        if (canonicalId != element.id || canonicalKind != element.kind ||
+                            db.assetOwnershipDao().findElementReference(element.id) != null
+                        ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Unexpected element projection")
+                        null
+                    }
+                    is DocumentAssetReferenceInspector.Finding.Unresolved ->
+                        fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Unresolved source element")
                 }
                 val newElementId = distinctId(generatedIds)
                 val rewritten = JSONObject(element.elementJson)
-                    .put("id", newElementId)
-                    .toString()
-                val (verifiedId, verifiedKind) = CanonicalContentValidator.element(rewritten)
-                check(verifiedId == newElementId && verifiedKind == indexedKind)
-                ElementEntity(
-                    id = newElementId, pageId = "", orderIndex = element.orderIndex,
-                    kind = indexedKind, elementJson = rewritten,
-                    revision = target.revision,
+                    .put("id", newElementId).toString()
+                val rewrittenFinding = DocumentAssetReferenceInspector.element(rewritten)
+                if (assetId != null) {
+                    if (rewrittenFinding != DocumentAssetReferenceInspector.Finding.Reference(assetId)) {
+                        fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Rewritten image owner is inconsistent")
+                    }
+                } else {
+                    val (verifiedId, verifiedKind) = CanonicalContentValidator.element(rewritten)
+                    check(verifiedId == newElementId && verifiedKind == element.kind)
+                }
+                ElementCopy(
+                    ElementEntity(
+                        id = newElementId, pageId = "", orderIndex = element.orderIndex,
+                        kind = element.kind, elementJson = rewritten, revision = target.revision,
+                    ),
+                    assetId,
                 )
             }
-            PageCopy(page, distinctId(generatedIds), copiedElements)
+            PageCopy(page, distinctId(generatedIds), pageAsset, copiedElements)
         }
 
-        // Retain parent-before-child insertion order. The target note row already
-        // exists in LIB-03's outer transaction. An exception here rolls it back.
+        // Parent-before-child and edge-after-owner writes are all enclosed by the
+        // same outer Room transaction as the destination note. No physical bytes
+        // or source asset metadata are changed.
         copies.forEach { copy ->
             db.pageDao().insert(copy.source.copy(
-                id = copy.newId,
-                noteId = targetId,
-                revision = target.revision,
+                id = copy.newId, noteId = targetId, revision = target.revision,
             ))
+            copy.pageAssetId?.let { assetId ->
+                db.assetOwnershipDao().insertPageReference(
+                    PageAssetReferenceEntity(copy.newId, assetId))
+            }
             copy.elements.forEach { element ->
-                db.elementDao().insert(element.copy(pageId = copy.newId))
+                db.elementDao().insert(element.row.copy(pageId = copy.newId))
+                element.assetId?.let { assetId ->
+                    db.assetOwnershipDao().insertElementReference(
+                        ElementAssetReferenceEntity(element.row.id, assetId))
+                }
             }
         }
     }
 
+    private suspend fun requireMatchedPageOwner(pageId: String, assetId: String) {
+        val owner = db.assetOwnershipDao().findPageReference(pageId)
+        val asset = db.assetDao().findById(assetId)
+        if (owner?.assetId != assetId || asset?.state != "finalized" ||
+            asset.mimeType != "application/pdf"
+        ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF source ownership mismatch")
+    }
+
+    private suspend fun requireMatchedElementOwner(elementId: String, assetId: String) {
+        val owner = db.assetOwnershipDao().findElementReference(elementId)
+        val asset = db.assetDao().findById(assetId)
+        if (owner?.assetId != assetId || asset?.state != "finalized" ||
+            asset.mimeType !in setOf("image/png", "image/jpeg")
+        ) fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "Image source ownership mismatch")
+    }
+
+    private data class ElementCopy(val row: ElementEntity, val assetId: String?)
+
     private data class PageCopy(
         val source: PageEntity,
         val newId: String,
-        val elements: List<ElementEntity>,
+        val pageAssetId: String?,
+        val elements: List<ElementCopy>,
     )
 
     private fun newId(): String = LibraryValidation.canonicalId(createId())
