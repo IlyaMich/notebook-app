@@ -321,13 +321,17 @@ class RoomDocumentRepository private constructor(
         }
         is DocumentEdit.ChangeBackground -> {
             val page = ownedPage(pages, edit.pageId)
-            // A legacy PDF reference cannot be dropped until reference updates are atomic.
-            if (isPdfBackground(page.backgroundJson)) {
-                fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF background replacement requires asset references")
-            }
+            // The generic command accepts only asset-free destination backgrounds.
+            // Releasing an existing PDF owner is a separate checked operation in
+            // this same transaction; no new asset can be attached through it.
             CanonicalContentValidator.background(edit.backgroundJson)
             if (page.backgroundJson == edit.backgroundJson) false else {
-                rejectIndexedPageEdge(page.id)
+                val priorPdfId = verifiedPdfPageOwnerAssetId(page)
+                if (priorPdfId != null) {
+                    if (db.assetOwnershipDao().removePageReferenceIfMatches(page.id, priorPdfId) != 1) {
+                        fail(LibraryErrorCode.UNSUPPORTED_CONTENT, "PDF background reference changed")
+                    }
+                }
                 check(db.pageDao().update(page.copy(backgroundJson = edit.backgroundJson, revision = revision)) == 1)
                 true
             }
