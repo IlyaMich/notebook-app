@@ -154,6 +154,21 @@ class Sto08AssetBackedNoteDuplicationAndroidTest {
         foreignKeysValid()
     }
 
+    @Test fun missingPdfOwnerProjectionRejectsDuplicateWithoutNewNote() = runBlocking {
+        val f = mediaFixture()
+        check(db.assetOwnershipDao().removePageReferenceIfMatches(f.pageId, f.pdfId) == 1)
+        val beforeNotes = db.noteDao().countAll()
+        val error = runCatching {
+            LibraryRepositoryFactory(db).noteLifecycle().duplicateNote(f.noteId)
+        }.exceptionOrNull()
+        assertTrue(error is LibraryOperationException)
+        assertEquals(LibraryErrorCode.UNSUPPORTED_CONTENT,
+            (error as LibraryOperationException).code)
+        assertEquals(beforeNotes, db.noteDao().countAll())
+        assertNotNull(db.noteDao().findById(f.noteId))
+        foreignKeysValid()
+    }
+
     @Test fun mismatchedPdfOwnerProjectionRejectsDuplicateWithoutNewNote() = runBlocking {
         val f = mediaFixture()
         val other = asset("application/pdf")
