@@ -1,6 +1,7 @@
 package com.notebook.app.data.library.impl
 
 import android.content.Context
+import java.io.File
 import com.notebook.app.data.content.impl.RoomDocumentRepository
 import com.notebook.app.data.content.impl.RoomNoteContentTransactionAdapter
 import com.notebook.app.data.content.repository.DocumentRepository
@@ -14,11 +15,18 @@ import com.notebook.app.data.local.AppDatabase
 import com.notebook.app.data.local.AppDatabaseProvider
 
 /** All repositories share one production AppDatabase; no DAO is exposed to UI. */
-class LibraryRepositoryFactory(private val database: AppDatabase) {
+class LibraryRepositoryFactory(
+    private val database: AppDatabase,
+    private val verifiedMediaRoot: File? = null,
+) {
     val folders: FolderRepository = RoomFolderRepository(database)
     val notebooks: NotebookRepository = RoomNotebookRepository(database)
     val notes: NoteRepository = RoomNoteRepository(database)
-    val documents: DocumentRepository = RoomDocumentRepository(database)
+    // The production composition root supplies application-private storage.
+    // Database-only test factories remain explicitly fail-closed for media writes.
+    val documents: DocumentRepository = RoomDocumentRepository(
+        database, verifiedImageRoot = verifiedMediaRoot
+    )
     val trash: LibraryTrashRepository = RoomLibraryTrashRepository(database)
 
     /** Production wiring: the real STO-02 adapter uses this same database. */
@@ -31,6 +39,9 @@ class LibraryRepositoryFactory(private val database: AppDatabase) {
 
     companion object {
         fun from(context: Context): LibraryRepositoryFactory =
-            LibraryRepositoryFactory(AppDatabaseProvider.get(context))
+            LibraryRepositoryFactory(
+                AppDatabaseProvider.get(context.applicationContext),
+                context.applicationContext.filesDir,
+            )
     }
 }
