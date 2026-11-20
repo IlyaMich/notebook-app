@@ -371,6 +371,7 @@ class ExportRetainedPrivateCopyAndroidTest {
         db = AppDatabaseProvider.openIsolated(context, name)
         val external = ByteArrayOutputStream()
         val dest = object : ExportExternalDocumentDestination {
+            override val destinationIdentitySha256: String = "1".repeat(64)
             override fun openWriteOnce(): ExportExternalDocumentDestination.Sink =
                 object : ExportExternalDocumentDestination.Sink {
                     override val output = external
@@ -400,6 +401,7 @@ class ExportRetainedPrivateCopyAndroidTest {
         retainReadyForUserDocument(operationId)
         val external = ByteArrayOutputStream()
         val corrupt = object : ExportExternalDocumentDestination {
+            override val destinationIdentitySha256: String = "1".repeat(64)
             override fun openWriteOnce(): ExportExternalDocumentDestination.Sink =
                 object : ExportExternalDocumentDestination.Sink {
                     override val output = external
