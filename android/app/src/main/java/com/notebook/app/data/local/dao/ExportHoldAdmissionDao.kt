@@ -7,6 +7,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.notebook.app.data.local.entity.ExportAssetHoldEntity
 import com.notebook.app.data.local.entity.ExportOperationEntity
+import com.notebook.app.data.local.entity.ExportSourceBindingEntity
 
 /** I5-B7B: insert-only primitives. The calling coordinator owns the ONE Room transaction. */
 @Dao
@@ -16,6 +17,13 @@ public interface ExportHoldAdmissionDao {
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertHold(hold: ExportAssetHoldEntity)
+
+    /** Never replace/update; the operation and every hold must share this transaction. */
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertSourceBinding(binding: ExportSourceBindingEntity)
+
+    @Query("SELECT * FROM export_source_bindings WHERE operation_id = :operationId LIMIT 1")
+    suspend fun findSourceBinding(operationId: String): ExportSourceBindingEntity?
 
     @Query("SELECT * FROM export_operations WHERE operation_id = :operationId LIMIT 1")
     suspend fun findOperation(operationId: String): ExportOperationEntity?
