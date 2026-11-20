@@ -172,4 +172,26 @@ internal object AppDatabaseMigrations {
             ExportHoldSchemaGuards.install(db)
         }
     }
+
+    /** v6 only adds immutable source identities; legacy v5 pins remain unbound. */
+    val MIGRATION_5_6: Migration = object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `export_source_bindings` (
+                    `operation_id` TEXT NOT NULL,
+                    `snapshot_sha256` TEXT NOT NULL,
+                    `asset_set_sha256` TEXT NOT NULL,
+                    `expected_asset_count` INTEGER NOT NULL,
+                    `expected_asset_bytes` INTEGER NOT NULL,
+                    `binding_version` INTEGER NOT NULL,
+                    PRIMARY KEY(`operation_id`),
+                    FOREIGN KEY(`operation_id`) REFERENCES `export_operations`(`operation_id`)
+                        ON UPDATE RESTRICT ON DELETE RESTRICT
+                )""".trimIndent()
+            )
+            // Never infer new provenance for pre-v6 operations.
+            ExportHoldSchemaGuards.install(db)
+            ExportHoldSchemaGuards.installSourceBindings(db)
+        }
+    }
 }
