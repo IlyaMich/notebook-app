@@ -155,8 +155,8 @@ internal class ExportPrivateStageReadOnlyVerifier(
         return ReadFile(size, memory?.toByteArray())
     }
 
-    private fun checkSnapshot(bytes: ByteArray, expected: ExportUntrustedPrivateStageObservation): Boolean =
-        try {
+    private fun checkSnapshot(bytes: ByteArray, expected: ExportUntrustedPrivateStageObservation): Boolean {
+        return try {
             val json = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
             if (json.str("format") != "internal-untrusted-captured-note-v1" ||
                 json.str("operationId") != expected.operationId
@@ -189,9 +189,10 @@ internal class ExportPrivateStageReadOnlyVerifier(
         } catch (_: NoSuchElementException) {
             false
         }
+    }
 
-    private fun checkManifest(bytes: ByteArray, expected: ExportUntrustedPrivateStageObservation): Boolean =
-        try {
+    private fun checkManifest(bytes: ByteArray, expected: ExportUntrustedPrivateStageObservation): Boolean {
+        return try {
             val json = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
             if (json.str("format") != "internal-untrusted-copy-manifest-v1" ||
                 json.str("operationId") != expected.operationId ||
@@ -216,6 +217,7 @@ internal class ExportPrivateStageReadOnlyVerifier(
         } catch (_: NoSuchElementException) {
             false
         }
+    }
 
     private fun validExpectation(x: ExportUntrustedPrivateStageObservation): Boolean {
         if (!canonicalUuid(x.operationId) || !canonicalUuid(x.noteId) ||
