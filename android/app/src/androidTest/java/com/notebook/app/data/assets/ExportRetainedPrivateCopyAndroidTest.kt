@@ -264,6 +264,87 @@ class ExportRetainedPrivateCopyAndroidTest {
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
     }
 
+    @Test fun v6BoundArchiveCopySurvivesRoomReopenWithoutReleasingHolds() = runBlocking {
+        val bytes = imageBytes()
+        val (asset, original) = registerImage(bytes)
+        val operation = id()
+        assertTrue(coordinator().stage(
+            operation, SnapshotRequest(noteId, snapLimits), copyLimits, 123L,
+        ) is ExportRetainedPrivateCopyCoordinator.Result.StagedUntrusted)
+
+        val recovery = ExportBoundPrivateStageRecovery(db, root, stageLimits)
+        val stageResult = recovery.inspectReadOnly(operation)
+        assertTrue(stageResult is ExportBoundPrivateStageRecovery.Result.BoundStageUntrusted)
+        val observation = (stageResult as
+            ExportBoundPrivateStageRecovery.Result.BoundStageUntrusted).observation
+        val draft = ExportPrivatePortableDraftWriter(
+            root, stageLimits, ExportAndroidDirectorySync::syncOrThrow,
+        ).writeDraft(observation)
+
+        val service = ExportHoldAdmissionComposition.independentPrivateArchiveForRoom(
+            root, db, stageLimits,
+        )
+        val first = service.retainPrivateCopy(operation)
+        assertTrue(first is ExportIndependentPrivateArchiveCoordinator.Result.PrivateCopyObservedUntrusted)
+        val privateCopy = (first as
+            ExportIndependentPrivateArchiveCoordinator.Result.PrivateCopyObservedUntrusted).archive
+        assertEquals(draft.sha256, privateCopy.sha256)
+        val separateFile = File(root,
+            "retained-private-export-archives/" + operation + ".notebook")
+        assertTrue(separateFile.isFile)
+        assertArrayEquals(
+            File(root, "pending-export-copies/" + operation + "/draft.notebook").readBytes(),
+            separateFile.readBytes(),
+        )
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        val reopened = ExportHoldAdmissionComposition.independentPrivateArchiveForRoom(
+            root, db, stageLimits,
+        )
+        assertEquals(first, reopened.inspectPrivateCopyReadOnly(operation))
+        assertTrue(runCatching {
+            reopened.retainPrivateCopy(operation)
+        }.exceptionOrNull() is IOException)
+        assertEquals(listOf(asset),
+            db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+        assertNotNull(db.exportHoldAdmissionDao().findSourceBinding(operation))
+        assertArrayEquals(bytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun damagedRetainedCopyAfterRoomReopenNeverPassesInspection() = runBlocking {
+        val bytes = imageBytes()
+        val (asset, original) = registerImage(bytes)
+        val operation = id()
+        assertTrue(coordinator().stage(
+            operation, SnapshotRequest(noteId, snapLimits), copyLimits, 123L,
+        ) is ExportRetainedPrivateCopyCoordinator.Result.StagedUntrusted)
+        val bound = ExportBoundPrivateStageRecovery(
+            db, root, stageLimits,
+        ).inspectReadOnly(operation) as ExportBoundPrivateStageRecovery.Result.BoundStageUntrusted
+        ExportPrivatePortableDraftWriter(
+            root, stageLimits, ExportAndroidDirectorySync::syncOrThrow,
+        ).writeDraft(bound.observation)
+        val service = ExportHoldAdmissionComposition.independentPrivateArchiveForRoom(
+            root, db, stageLimits,
+        )
+        assertTrue(service.retainPrivateCopy(operation) is
+            ExportIndependentPrivateArchiveCoordinator.Result.PrivateCopyObservedUntrusted)
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        val archive = File(root,
+            "retained-private-export-archives/" + operation + ".notebook")
+        archive.writeBytes(archive.readBytes().reversedArray())
+        assertTrue(ExportHoldAdmissionComposition.independentPrivateArchiveForRoom(
+            root, db, stageLimits,
+        ).inspectPrivateCopyReadOnly(operation) is
+            ExportIndependentPrivateArchiveCoordinator.Result.Incomplete)
+        assertEquals(listOf(asset),
+            db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+        assertArrayEquals(bytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
     @Test fun trashedNoteRejectsBeforeCreatingPinsOrStage() = runBlocking {
         val bytes = imageBytes()
         val (_, original) = registerImage(bytes)
