@@ -63,6 +63,18 @@ internal class ExportPrivateStageReadOnlyVerifier(
                 for (entry in entries) {
                     currentCoroutineContext().ensureActive()
                     val name = entry.fileName.toString()
+                    if (name == "draft.notebook") {
+                        // An optional private archive draft is NOT a stage receipt.
+                        // Verify its structure separately; NEVER infer trust from presence.
+                        val size = Files.readAttributes(entry, BasicFileAttributes::class.java,
+                            LinkOption.NOFOLLOW_LINKS)
+                        val budget = limits.maxTotalAssetBytes + 2L * limits.maxMetadataBytes +
+                            1024L * (limits.maxAssets + 128L)
+                        if (!size.isRegularFile || size.isSymbolicLink ||
+                            size.size() < 0L || size.size() > budget
+                        ) return@withContext reject(Reason.UNSAFE_FILE)
+                        continue
+                    }
                     if (!expectedNames.contains(name) || !found.add(name)) {
                         return@withContext reject(Reason.UNEXPECTED_ENTRY)
                     }
