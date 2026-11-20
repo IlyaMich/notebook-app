@@ -23,6 +23,14 @@ internal data class ExportVerifiedSourceObservation(
     val totalEncodedBytes: Long,
 )
 
+/** Verified original bytes are borrowed only while the owning outer lease is held. */
+internal interface ExportHeldAssetBorrower {
+    suspend fun <T> withBytesUnderHeldLease(
+        expected: SnapshotAssetMetadata,
+        action: suspend (ExpectedEncodedImage, ByteArray) -> T,
+    ): T
+}
+
 /**
  * I4B-2C-2B: exact original-byte inspection. Must ONLY be invoked from a callback
  * already holding the one shared asset-publication lease. This class never acquires
@@ -32,7 +40,22 @@ internal data class ExportVerifiedSourceObservation(
 internal class ExportLeasedSourceByteInspector(
     private val privateFilesDir: File,
     private val assetDao: AssetDao,
-) : ExportSingleImageByteBorrower {
+) : ExportSingleImageByteBorrower, ExportHeldAssetBorrower {
+    /**
+     * Multi-asset export staging only; the caller MUST hold the one outer lease.
+     * The borrowed array is cleared by withCheckedSourceBytes on every exit.
+     */
+    override suspend fun <T> withBytesUnderHeldLease(
+        expected: SnapshotAssetMetadata,
+        action: suspend (ExpectedEncodedImage, ByteArray) -> T,
+    ): T = withContext(Dispatchers.IO) {
+        withCheckedSourceBytes(expected) { info, bytes ->
+            action(ExpectedEncodedImage(
+                info.assetId, info.mimeType, info.sha256, info.encodedBytes,
+            ), bytes)
+        }
+    }
+
     /** Reuses the same source verification routine as the borrowed single-image path. */
     suspend fun inspectUnderHeldLease(
         plan: ExportCopyAdmissionPlan,
