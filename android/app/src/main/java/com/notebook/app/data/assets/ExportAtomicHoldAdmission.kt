@@ -101,7 +101,6 @@ internal class ExportAtomicHoldAdmission(
             }
         }
     }
-}
 
 internal sealed interface ExportAtomicHoldCaptureResult {
     data class Committed(
