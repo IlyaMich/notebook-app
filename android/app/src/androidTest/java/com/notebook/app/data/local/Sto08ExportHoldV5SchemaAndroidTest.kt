@@ -83,7 +83,7 @@ class Sto08ExportHoldV5SchemaAndroidTest {
     }
 
     @Test fun freshV5HasEmptyHoldTablesAndUnverifiedOwnershipGate() {
-        assertEquals(5, db.openHelper.writableDatabase.version)
+        assertEquals(6, db.openHelper.writableDatabase.version)
         assertEquals(1, count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='export_operations'"))
         assertEquals(1, count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='export_asset_holds'"))
         assertEquals(0, count("SELECT COUNT(*) FROM export_operations"))

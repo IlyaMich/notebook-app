@@ -21,4 +21,16 @@ internal object ExportHoldSchemaGuards {
         )
         triggers.forEach(db::execSQL)
     }
+
+    /** v6 immutable source-to-hold binding; never creates release permissions. */
+    fun installSourceBindings(db: SupportSQLiteDatabase) {
+        listOf(
+            """CREATE TRIGGER IF NOT EXISTS `trg_export_source_binding_no_update`
+               BEFORE UPDATE ON `export_source_bindings`
+               BEGIN SELECT RAISE(ABORT, 'Export source binding cannot change'); END""",
+            """CREATE TRIGGER IF NOT EXISTS `trg_export_source_binding_no_delete`
+               BEFORE DELETE ON `export_source_bindings`
+               BEGIN SELECT RAISE(ABORT, 'Export source binding cannot be deleted'); END""",
+        ).forEach(db::execSQL)
+    }
 }

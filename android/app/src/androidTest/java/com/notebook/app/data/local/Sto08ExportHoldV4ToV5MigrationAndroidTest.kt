@@ -94,7 +94,7 @@ class Sto08ExportHoldV4ToV5MigrationAndroidTest {
     private data class Fixture(val book: String, val note: String, val page: String, val element: String, val pdf: String, val image: String, val spare: String)
     private fun migrate(): AppDatabase = AppDatabaseProvider.openIsolated(context,databaseName).also {
         opened = it
-        assertEquals(5,it.openHelper.writableDatabase.version)
+        assertEquals(6,it.openHelper.writableDatabase.version)
     }
     private fun count(sql: String, vararg args: String): Int =
         opened!!.openHelper.writableDatabase.query(sql, args).use { cursor ->
