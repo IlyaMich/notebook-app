@@ -31,6 +31,10 @@ public interface ExportHoldAdmissionDao {
     @Query("SELECT * FROM export_asset_holds WHERE operation_id = :operationId ORDER BY asset_id ASC")
     suspend fun listHolds(operationId: String): List<ExportAssetHoldEntity>
 
+    /** Plus-one probe prevents unbounded recovery of malformed/excessive pin sets. */
+    @Query("SELECT * FROM export_asset_holds WHERE operation_id = :operationId ORDER BY asset_id ASC LIMIT :rowLimit")
+    suspend fun listHoldsBounded(operationId: String, rowLimit: Int): List<ExportAssetHoldEntity>
+
     /** The +1 probe is supplied by the bounded read-only recovery coordinator. */
     @Query("SELECT * FROM export_operations ORDER BY operation_id ASC LIMIT :rowLimit")
     suspend fun listRecoveryOperations(rowLimit: Int): List<ExportOperationEntity>
