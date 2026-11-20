@@ -42,11 +42,33 @@ internal class ExportAtomicHoldAdmission(
         require(parsed != null && parsed.toString() == operationId) { "Canonical export operation UUID required" }
         require(createdAtMillis >= 0L) { "Negative creation timestamp" }
         return outerLease.withLease {
-            currentCoroutineContext().ensureActive()
-            db.withTransaction {
+            when (val value = persistUnderHeldLease(operationId, request, admissionLimits, createdAtMillis)) {
+                is ExportAtomicHoldCaptureResult.Rejected -> ExportAtomicHoldResult.Rejected(value.reason)
+                is ExportAtomicHoldCaptureResult.Committed ->
+                    ExportAtomicHoldResult.Committed(value.operationId, value.assetIds)
+            }
+        }
+    }
+
+    /**
+     * Caller MUST already hold the single shared asset publication lease.
+     * Never call persist() from the outer lease: it acquires the lease itself.
+     * The detached plan is from the exact Room snapshot that inserted the holds.
+     */
+    internal suspend fun persistUnderHeldLease(
+        operationId: String,
+        request: SnapshotRequest,
+        admissionLimits: ExportCopyAdmissionLimits,
+        createdAtMillis: Long,
+    ): ExportAtomicHoldCaptureResult {
+        val parsed = try { UUID.fromString(operationId) } catch (_: IllegalArgumentException) { null }
+        require(parsed != null && parsed.toString() == operationId) { "Canonical export operation UUID required" }
+        require(createdAtMillis >= 0L) { "Negative creation timestamp" }
+        currentCoroutineContext().ensureActive()
+        return db.withTransaction {
                 currentCoroutineContext().ensureActive()
                 when (val source = reader.captureInTransaction(request)) {
-                    is SnapshotResult.Rejected -> ExportAtomicHoldResult.Rejected(source.reason)
+                    is SnapshotResult.Rejected -> ExportAtomicHoldCaptureResult.Rejected(source.reason)
                     is SnapshotResult.Complete -> {
                         // plan() independently checks owner occurrences and distinct-asset set.
                         val plan = ExportCopyAdmission.plan(source, admissionLimits)
@@ -73,10 +95,18 @@ internal class ExportAtomicHoldAdmission(
                         // Assert the exact committed set inside this same transaction.
                         val actual = dao.listHolds(operationId).map { it.assetId }
                         check(actual == ids.sorted()) { "Incomplete or unexpected export hold set" }
-                        ExportAtomicHoldResult.Committed(operationId, actual)
+                        ExportAtomicHoldCaptureResult.Committed(operationId, actual, plan)
                     }
                 }
             }
         }
     }
+
+internal sealed interface ExportAtomicHoldCaptureResult {
+    data class Committed(
+        val operationId: String,
+        val assetIds: List<String>,
+        val plan: ExportCopyAdmissionPlan,
+    ) : ExportAtomicHoldCaptureResult
+    data class Rejected(val reason: SnapshotRejection) : ExportAtomicHoldCaptureResult
 }
