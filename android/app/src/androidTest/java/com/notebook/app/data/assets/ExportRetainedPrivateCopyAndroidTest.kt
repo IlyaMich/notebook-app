@@ -18,6 +18,7 @@ import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.zip.ZipFile
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.*
@@ -132,6 +133,60 @@ class ExportRetainedPrivateCopyAndroidTest {
         assertEquals(listOf(asset), db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
         assertTrue(File(root, "pending-export-copies/$operation").exists())
         assertFalse(File(root, "pending-export-copies/$operation/manifest.json").exists())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun stagedSnapshotCanBeRecheckedAfterRoomReopenAndDraftedWithoutRelease() = runBlocking {
+        val bytes = imageBytes()
+        val (asset, original) = registerImage(bytes)
+        val operation = id()
+        val outcome = coordinator().stage(operation, SnapshotRequest(noteId, snapLimits),
+            copyLimits, 123L)
+        assertTrue(outcome is ExportRetainedPrivateCopyCoordinator.Result.StagedUntrusted)
+        val observation = (outcome as ExportRetainedPrivateCopyCoordinator.Result.StagedUntrusted).observation
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        val inspection = ExportPrivateStageReadOnlyVerifier(root, stageLimits).inspect(observation)
+        assertEquals(ExportPrivateStageReadOnlyVerifier.Assessment.MatchedUntrusted(observation), inspection)
+        val draft = ExportPrivatePortableDraftWriter(
+            root, stageLimits, ExportAndroidDirectorySync::syncOrThrow,
+        ).writeDraft(observation)
+        assertEquals(noteId, draft.noteId)
+        ZipFile(File(root, "pending-export-copies/$operation/draft.notebook")).use { zip ->
+            assertNotNull(zip.getEntry("manifest.json"))
+            val assetName = "assets/" + observation.copies.single().sha256 + ".png"
+            assertArrayEquals(bytes,
+                zip.getInputStream(zip.getEntry(assetName)).use { it.readBytes() })
+        }
+        assertEquals(listOf(asset), db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+        assertArrayEquals(bytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun tamperedPrivateCopyAfterRoomReopenCannotBecomePortableDraft() = runBlocking {
+        val bytes = imageBytes()
+        val (asset, original) = registerImage(bytes)
+        val operation = id()
+        val outcome = coordinator().stage(operation, SnapshotRequest(noteId, snapLimits),
+            copyLimits, 123L)
+        assertTrue(outcome is ExportRetainedPrivateCopyCoordinator.Result.StagedUntrusted)
+        val observation = (outcome as ExportRetainedPrivateCopyCoordinator.Result.StagedUntrusted).observation
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        val copy = File(root, "pending-export-copies/$operation/" +
+            observation.copies.single().fileName)
+        copy.writeBytes(bytes.reversedArray()) // Only isolated stage fixture is changed.
+        val assessment = ExportPrivateStageReadOnlyVerifier(root, stageLimits).inspect(observation)
+        assertEquals(ExportPrivateStageReadOnlyVerifier.Assessment.Rejected(
+            ExportPrivateStageReadOnlyVerifier.Reason.BYTES_MISMATCH), assessment)
+        assertTrue(runCatching {
+            ExportPrivatePortableDraftWriter(
+                root, stageLimits, ExportAndroidDirectorySync::syncOrThrow,
+            ).writeDraft(observation)
+        }.exceptionOrNull() is IOException)
+        assertFalse(File(root, "pending-export-copies/$operation/draft.notebook").exists())
+        assertEquals(listOf(asset), db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+        assertArrayEquals(bytes, original.readBytes())
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
     }
 
