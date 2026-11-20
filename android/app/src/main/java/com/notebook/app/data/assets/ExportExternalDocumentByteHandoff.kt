@@ -25,6 +25,8 @@ import kotlinx.coroutines.withContext
  * Callers must acquire a NEW SAF ACTION_CREATE_DOCUMENT URI per attempt.
  */
 internal interface ExportExternalDocumentDestination {
+    /** SHA-256 of one freshly selected destination identity; never a raw URI in Room. */
+    val destinationIdentitySha256: String
     interface Sink : Closeable {
         val output: OutputStream
         /** Must fail closed if the provider cannot synchronize the bytes. */

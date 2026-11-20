@@ -17,6 +17,8 @@ import com.notebook.app.data.local.entity.AssetReferenceIndexStateEntity
 import com.notebook.app.data.local.entity.ExportOperationEntity
 import com.notebook.app.data.local.entity.ExportAssetHoldEntity
 import com.notebook.app.data.local.entity.ExportSourceBindingEntity
+import com.notebook.app.data.local.entity.ExportExternalHandoffAttemptEntity
+import com.notebook.app.data.local.entity.ExportExternalReadbackObservationEntity
 import com.notebook.app.data.local.entity.ElementEntity
 import com.notebook.app.data.local.entity.PageEntity
 import com.notebook.app.data.local.entity.FolderEntity
@@ -37,8 +39,9 @@ import com.notebook.app.data.local.entity.NoteEntity
         AssetReferenceIndexStateEntity::class,
         ExportOperationEntity::class, ExportAssetHoldEntity::class,
         ExportSourceBindingEntity::class,
+        ExportExternalHandoffAttemptEntity::class, ExportExternalReadbackObservationEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {

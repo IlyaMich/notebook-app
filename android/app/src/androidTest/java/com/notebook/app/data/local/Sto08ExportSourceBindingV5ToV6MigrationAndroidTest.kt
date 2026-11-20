@@ -87,7 +87,7 @@ class Sto08ExportSourceBindingV5ToV6MigrationAndroidTest {
         val db = AppDatabaseProvider.openIsolated(context, name)
         database = db
         val sql = db.openHelper.writableDatabase
-        assertEquals(6, sql.version)
+        assertEquals(7, sql.version)
         assertEquals(1, count(sql, "SELECT COUNT(*) FROM export_operations WHERE operation_id=?", operation))
         assertEquals(1, count(sql, "SELECT COUNT(*) FROM export_asset_holds WHERE operation_id=? AND asset_id=?", operation, asset))
         assertEquals(0, count(sql, "SELECT COUNT(*) FROM export_source_bindings"))

@@ -27,6 +27,7 @@ object AppDatabaseProvider {
                 AppDatabaseMigrations.MIGRATION_3_4,
                 AppDatabaseMigrations.MIGRATION_4_5,
                 AppDatabaseMigrations.MIGRATION_5_6,
+                AppDatabaseMigrations.MIGRATION_6_7,
             )
             // Deliberately NO fallbackToDestructiveMigration().
             .build()

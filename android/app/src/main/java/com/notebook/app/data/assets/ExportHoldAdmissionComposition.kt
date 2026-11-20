@@ -131,6 +131,7 @@ internal object ExportHoldAdmissionComposition {
                 privateFilesDir, db, stageLimits,
             ),
             bytes = ExportExternalDocumentByteHandoff(privateFilesDir, stageLimits),
+            journal = ExportExternalAttemptJournal(db, stageLimits),
         )
 
     /** Allows isolated Room verification without accessing the application's library.sqlite. */

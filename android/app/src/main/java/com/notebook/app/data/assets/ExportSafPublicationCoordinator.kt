@@ -21,6 +21,7 @@ import kotlinx.coroutines.ensureActive
 internal class ExportSafPublicationCoordinator(
     private val privateArchive: ExportIndependentPrivateArchiveCoordinator,
     private val bytes: ExportExternalDocumentByteHandoff,
+    private val journal: ExportExternalAttemptJournal,
 ) {
     internal sealed interface Result {
         data class ExternalBytesObservedUntrusted(
@@ -51,8 +52,16 @@ internal class ExportSafPublicationCoordinator(
         if (first !is ExportIndependentPrivateArchiveCoordinator.Result.PrivateCopyObservedUntrusted) {
             return Result.Incomplete("Immutable Room-bound private archive not verified")
         }
-        // Do not hold the OS lease while dispatching an arbitrary external
-        // DocumentProvider. Immutable v6 holds remain in Room after lease exit.
+        // Commit a one-shot, immutable attempt BEFORE any provider byte I/O.
+        // Interrupted/failed attempts are never automatically retried or removed.
+        val admission = journal.beginOnce(
+            first.archive, destination.destinationIdentitySha256,
+        )
+        if (admission is ExportExternalAttemptJournal.Admission.Incomplete) {
+            return Result.Incomplete("External handoff blocked: " + admission.reason)
+        }
+        // Never hold the OS asset lease over a remote/cloud DocumentProvider.
+        // Room v7 attempt and the v6 holds survive cancellation/process death.
         val readback = bytes.copyAndReread(first.archive, destination)
         if (readback.operationId != first.archive.operationId ||
             readback.byteCount != first.archive.bytes ||
@@ -64,7 +73,12 @@ internal class ExportSafPublicationCoordinator(
             throw IOException("Room-bound archive provenance changed after external handoff")
         }
         currentCoroutineContext().ensureActive()
-        // Deliberately no Room phase transition, receipt or hold release.
+        // Persist only an untrusted diagnostic matching the original immutable
+        // attempt. If this commit fails, the provider result is still ambiguous.
+        journal.recordMatchingReread(readback)
+        currentCoroutineContext().ensureActive()
+        // Deliberately no completion receipt, Room operation phase transition,
+        // hold release or GC decision.
         return Result.ExternalBytesObservedUntrusted(readback)
     }
 }
