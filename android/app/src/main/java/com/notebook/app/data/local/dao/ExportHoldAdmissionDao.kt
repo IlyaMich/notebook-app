@@ -7,6 +7,9 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.notebook.app.data.local.entity.ExportAssetHoldEntity
 import com.notebook.app.data.local.entity.ExportOperationEntity
+import com.notebook.app.data.local.entity.ExportSourceBindingEntity
+import com.notebook.app.data.local.entity.ExportExternalHandoffAttemptEntity
+import com.notebook.app.data.local.entity.ExportExternalReadbackObservationEntity
 
 /** I5-B7B: insert-only primitives. The calling coordinator owns the ONE Room transaction. */
 @Dao
@@ -17,11 +20,35 @@ public interface ExportHoldAdmissionDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertHold(hold: ExportAssetHoldEntity)
 
+    /** Never replace/update; the operation and every hold must share this transaction. */
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertSourceBinding(binding: ExportSourceBindingEntity)
+
+    @Query("SELECT * FROM export_source_bindings WHERE operation_id = :operationId LIMIT 1")
+    suspend fun findSourceBinding(operationId: String): ExportSourceBindingEntity?
+
+    /** V7 immutable handoff journal. The caller owns each Room transaction. */
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertExternalAttempt(attempt: ExportExternalHandoffAttemptEntity)
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertExternalReadback(observation: ExportExternalReadbackObservationEntity)
+
+    @Query("SELECT * FROM export_external_handoff_attempts WHERE operation_id = :operationId LIMIT 1")
+    suspend fun findExternalAttempt(operationId: String): ExportExternalHandoffAttemptEntity?
+
+    @Query("SELECT * FROM export_external_readback_observations WHERE operation_id = :operationId LIMIT 1")
+    suspend fun findExternalReadback(operationId: String): ExportExternalReadbackObservationEntity?
+
     @Query("SELECT * FROM export_operations WHERE operation_id = :operationId LIMIT 1")
     suspend fun findOperation(operationId: String): ExportOperationEntity?
 
     @Query("SELECT * FROM export_asset_holds WHERE operation_id = :operationId ORDER BY asset_id ASC")
     suspend fun listHolds(operationId: String): List<ExportAssetHoldEntity>
+
+    /** Plus-one probe prevents unbounded recovery of malformed/excessive pin sets. */
+    @Query("SELECT * FROM export_asset_holds WHERE operation_id = :operationId ORDER BY asset_id ASC LIMIT :rowLimit")
+    suspend fun listHoldsBounded(operationId: String, rowLimit: Int): List<ExportAssetHoldEntity>
 
     /** The +1 probe is supplied by the bounded read-only recovery coordinator. */
     @Query("SELECT * FROM export_operations ORDER BY operation_id ASC LIMIT :rowLimit")

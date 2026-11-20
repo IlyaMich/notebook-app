@@ -49,6 +49,8 @@ internal object LibrarySchemaGuards {
             // Room v4 fresh database: start with an unverified ownership index.
             AssetReferenceIndexGuards.initializeEmptyIndex(db)
             ExportHoldSchemaGuards.install(db)
+            ExportHoldSchemaGuards.installSourceBindings(db)
+            ExportHoldSchemaGuards.installExternalObservations(db)
         }
     }
 }

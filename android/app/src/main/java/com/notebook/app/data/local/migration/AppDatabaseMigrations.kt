@@ -172,4 +172,61 @@ internal object AppDatabaseMigrations {
             ExportHoldSchemaGuards.install(db)
         }
     }
+
+    /** v6 only adds immutable source identities; legacy v5 pins remain unbound. */
+    val MIGRATION_5_6: Migration = object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `export_source_bindings` (
+                    `operation_id` TEXT NOT NULL,
+                    `snapshot_sha256` TEXT NOT NULL,
+                    `asset_set_sha256` TEXT NOT NULL,
+                    `expected_asset_count` INTEGER NOT NULL,
+                    `expected_asset_bytes` INTEGER NOT NULL,
+                    `binding_version` INTEGER NOT NULL,
+                    PRIMARY KEY(`operation_id`),
+                    FOREIGN KEY(`operation_id`) REFERENCES `export_operations`(`operation_id`)
+                        ON UPDATE RESTRICT ON DELETE RESTRICT
+                )""".trimIndent()
+            )
+            // Never infer new provenance for pre-v6 operations.
+            ExportHoldSchemaGuards.install(db)
+            ExportHoldSchemaGuards.installSourceBindings(db)
+        }
+    }
+
+    /** V7: additive, insert-only external provider attempt and observation log. */
+    val MIGRATION_6_7: Migration = object : Migration(6, 7) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `export_external_handoff_attempts` (
+                    `operation_id` TEXT NOT NULL,
+                    `destination_identity_sha256` TEXT NOT NULL,
+                    `archive_sha256` TEXT NOT NULL,
+                    `archive_bytes` INTEGER NOT NULL,
+                    `snapshot_sha256` TEXT NOT NULL,
+                    `asset_set_sha256` TEXT NOT NULL,
+                    `attempted_at_ms` INTEGER NOT NULL,
+                    `attempt_version` INTEGER NOT NULL,
+                    PRIMARY KEY(`operation_id`),
+                    FOREIGN KEY(`operation_id`) REFERENCES `export_operations`(`operation_id`)
+                        ON UPDATE RESTRICT ON DELETE RESTRICT
+                )""".trimIndent()
+            )
+            db.execSQL(
+                """CREATE TABLE IF NOT EXISTS `export_external_readback_observations` (
+                    `operation_id` TEXT NOT NULL,
+                    `observed_sha256` TEXT NOT NULL,
+                    `observed_bytes` INTEGER NOT NULL,
+                    `observed_at_ms` INTEGER NOT NULL,
+                    `observation_version` INTEGER NOT NULL,
+                    PRIMARY KEY(`operation_id`),
+                    FOREIGN KEY(`operation_id`) REFERENCES `export_external_handoff_attempts`(`operation_id`)
+                        ON UPDATE RESTRICT ON DELETE RESTRICT
+                )""".trimIndent()
+            )
+            // No attempt, receipt or readback is invented for historical exports.
+            ExportHoldSchemaGuards.installExternalObservations(db)
+        }
+    }
 }

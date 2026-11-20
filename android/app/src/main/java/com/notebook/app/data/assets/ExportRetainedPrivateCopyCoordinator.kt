@@ -39,9 +39,18 @@ internal class ExportRetainedPrivateCopyCoordinator(
                 // This is after the Room transaction committed. Pins MUST remain
                 // retained on any later failure, including a stage-sync failure.
                 currentCoroutineContext().ensureActive()
+                val snapshot = ExportSourceBindingDigests.snapshot(operationId, held.snapshot)
+                if (ExportSourceBindingDigests.sha256(snapshot) != held.binding.snapshotSha256 ||
+                    ExportSourceBindingDigests.assetSetDigest(held.plan.images) != held.binding.assetSetSha256 ||
+                    held.binding.expectedAssetCount != held.assetIds.size ||
+                    held.binding.expectedAssetBytes != held.plan.totalEncodedBytes ||
+                    held.binding.bindingVersion != ExportSourceBindingDigests.BINDING_VERSION
+                ) throw IOException("Export source differs from immutable Room binding")
                 val staged = stages.createNew(operationId)
-                val snapshot = ExportCapturedDocumentCodec.snapshot(operationId, held.snapshot)
-                staged.writeCapturedSnapshot(snapshot)
+                val stagedDigest = staged.writeCapturedSnapshot(snapshot)
+                if (stagedDigest != held.binding.snapshotSha256) {
+                    throw IOException("Private snapshot digest differs from immutable Room capture")
+                }
                 val copied = ArrayList<ExportPrivateCopyObservation>()
                 var bytes = 0L
                 for (expected in held.plan.images) {

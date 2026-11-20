@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import com.notebook.app.data.local.AppDatabase
 import com.notebook.app.data.local.entity.ExportAssetHoldEntity
 import com.notebook.app.data.local.entity.ExportOperationEntity
+import com.notebook.app.data.local.entity.ExportSourceBindingEntity
 import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.currentCoroutineContext
@@ -83,7 +84,7 @@ internal class ExportAtomicHoldAdmission(
                                 state = "COMMITTED_PIN_SET",
                                 createdAtMillis = createdAtMillis,
                                 updatedAtMillis = createdAtMillis,
-                                protocolVersion = 1,
+                                protocolVersion = 2, // v6: same-transaction immutable source binding
                             ),
                         )
                         for ((index, id) in ids.withIndex()) {
@@ -95,7 +96,22 @@ internal class ExportAtomicHoldAdmission(
                         // Assert the exact committed set inside this same transaction.
                         val actual = dao.listHolds(operationId).map { it.assetId }
                         check(actual == ids.sorted()) { "Incomplete or unexpected export hold set" }
-                        ExportAtomicHoldCaptureResult.Committed(operationId, actual, plan, source)
+                        // Capture one deterministic representation here, not after Room has
+                        // committed and another editor might have changed live page contents.
+                        val snapshotBytes = ExportSourceBindingDigests.snapshot(operationId, source)
+                        val binding = ExportSourceBindingEntity(
+                            operationId = operationId,
+                            snapshotSha256 = ExportSourceBindingDigests.sha256(snapshotBytes),
+                            assetSetSha256 = ExportSourceBindingDigests.assetSetDigest(plan.images),
+                            expectedAssetCount = plan.images.size,
+                            expectedAssetBytes = plan.totalEncodedBytes,
+                            bindingVersion = ExportSourceBindingDigests.BINDING_VERSION,
+                        )
+                        currentCoroutineContext().ensureActive()
+                        dao.insertSourceBinding(binding)
+                        // Operation, all holds and their independently restart-checkable
+                        // source binding commit or roll back as ONE Room transaction.
+                        ExportAtomicHoldCaptureResult.Committed(operationId, actual, plan, source, binding)
                     }
                 }
             }
@@ -108,6 +124,7 @@ internal sealed interface ExportAtomicHoldCaptureResult {
         val assetIds: List<String>,
         val plan: ExportCopyAdmissionPlan,
         val snapshot: SnapshotResult.Complete,
+        val binding: ExportSourceBindingEntity,
     ) : ExportAtomicHoldCaptureResult
     data class Rejected(val reason: SnapshotRejection) : ExportAtomicHoldCaptureResult
 }
