@@ -99,6 +99,9 @@ class ExportPrivatePortableDraftWriterTest {
             assertArrayEquals(f.bytes,
                 zip.getInputStream(zip.getEntry(assetPath)).use { it.readBytes() })
         }
+        assertEquals(draft,
+            ExportPrivatePortableDraftWriter(f.root, limits, syncDirectory = {})
+                .inspectExistingDraftReadOnly(f.observed))
         assertFalse(File(stageDir, "receipt").exists())
         assertFalse(File(f.root, "assets").exists())
         assertArrayEquals(f.bytes, File(stageDir, f.observed.copies.single().fileName).readBytes())
@@ -123,6 +126,20 @@ class ExportPrivatePortableDraftWriterTest {
             }).writeDraft(f.observed)
         }.exceptionOrNull() is IOException)
         assertTrue(File(f.stageDir(), "draft.notebook").exists())
+        assertArrayEquals(f.bytes,
+            File(f.stageDir(), f.observed.copies.single().fileName).readBytes())
+    }
+
+    @Test fun tamperedPrivateDraftAfterRestartCannotMatch() = runBlocking {
+        val f = fixture()
+        ExportPrivatePortableDraftWriter(f.root, limits, syncDirectory = {})
+            .writeDraft(f.observed)
+        val file = File(f.stageDir(), "draft.notebook")
+        file.writeBytes(file.readBytes().reversedArray())
+        assertTrue(runCatching {
+            ExportPrivatePortableDraftWriter(f.root, limits, syncDirectory = {})
+                .inspectExistingDraftReadOnly(f.observed)
+        }.exceptionOrNull() is IOException)
         assertArrayEquals(f.bytes,
             File(f.stageDir(), f.observed.copies.single().fileName).readBytes())
     }
