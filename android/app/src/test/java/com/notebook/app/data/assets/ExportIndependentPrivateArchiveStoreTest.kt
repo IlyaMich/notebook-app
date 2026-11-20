@@ -108,8 +108,12 @@ class ExportIndependentPrivateArchiveStoreTest {
                 }
             }).copyNew(f.draft)
         }.exceptionOrNull() is IOException)
-        assertFalse(f.retained().exists())
-        assertTrue(f.partial().exists())
+        // The atomic rename happened, but durable directory confirmation failed.
+        // Preserve the ambiguous final name; never adopt or overwrite it.
+        assertTrue(f.retained().exists())
+        assertFalse(f.partial().exists())
+        assertTrue(runCatching { store(f.root).copyNew(f.draft) }
+            .exceptionOrNull() is IOException)
         assertArrayEquals(f.bytes, f.source().readBytes())
     }
 
