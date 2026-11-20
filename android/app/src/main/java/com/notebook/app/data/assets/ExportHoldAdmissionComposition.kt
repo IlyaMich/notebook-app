@@ -72,6 +72,40 @@ internal object ExportHoldAdmissionComposition {
         )
     }
 
+    /**
+     * Produce an additional app-private archive copy only after verifying Room
+     * v6 source binding and the private portable draft. This is NOT external
+     * publication and does not grant hold release, `VERIFIED` or GC authority.
+     */
+    fun independentPrivateArchiveForApplication(
+        context: Context,
+        stageLimits: ExportPrivateStageLimits,
+    ): ExportIndependentPrivateArchiveCoordinator {
+        val app = context.applicationContext
+        return independentPrivateArchiveForRoom(
+            app.filesDir, AppDatabaseProvider.get(app), stageLimits,
+        )
+    }
+
+    internal fun independentPrivateArchiveForRoom(
+        privateFilesDir: File,
+        db: AppDatabase,
+        stageLimits: ExportPrivateStageLimits,
+    ): ExportIndependentPrivateArchiveCoordinator {
+        val coordinator = AssetAcquisitionLeaseCoordinator(privateFilesDir)
+        val lease = object : ExportOuterLease {
+            override suspend fun <T> withLease(action: suspend () -> T): T =
+                coordinator.withLease(action)
+        }
+        return ExportIndependentPrivateArchiveCoordinator(
+            outerLease = lease,
+            recovery = ExportBoundPrivateStageRecovery(db, privateFilesDir, stageLimits),
+            store = ExportIndependentPrivateArchiveStore(
+                privateFilesDir, stageLimits, ExportAndroidDirectorySync::syncOrThrow,
+            ),
+        )
+    }
+
     /** Allows isolated Room verification without accessing the application's library.sqlite. */
     internal fun forRoom(privateFilesDir: File, db: AppDatabase): ExportAtomicHoldAdmission {
         val coordinator = AssetAcquisitionLeaseCoordinator(privateFilesDir)
