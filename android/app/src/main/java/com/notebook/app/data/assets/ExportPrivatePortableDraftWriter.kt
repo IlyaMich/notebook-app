@@ -62,8 +62,12 @@ internal class ExportPrivatePortableDraftWriter(
         if (!Files.isRegularFile(snapshotFile, LinkOption.NOFOLLOW_LINKS) ||
             Files.size(snapshotFile) > limits.maxMetadataBytes
         ) throw IOException("Unsafe source snapshot")
+        val snapshotBytes = Files.readAllBytes(snapshotFile)
+        if (shaBytes(snapshotBytes) != expected.snapshotSha256) {
+            throw IOException("Captured snapshot changed since stage validation")
+        }
         val snapshot = Json.parseToJsonElement(
-            Files.readAllBytes(snapshotFile).toString(Charsets.UTF_8),
+            snapshotBytes.toString(Charsets.UTF_8),
         ).jsonObject
         val model = modelFor(expected, snapshot)
 
@@ -130,6 +134,9 @@ internal class ExportPrivatePortableDraftWriter(
         // Validate the archive independently after writing. No acceptance by writer flags.
         validateDraft(draft.toFile(), model)
         syncDirectory(stage.toFile())
+        if (verifier.inspect(expected) !is
+            ExportPrivateStageReadOnlyVerifier.Assessment.MatchedUntrusted
+        ) throw IOException("Private source stage changed during ZIP generation")
         val digest = shaFile(draft)
         currentCoroutineContext().ensureActive()
         DraftUntrusted(expected.operationId, expected.noteId, expected.noteRevision,
@@ -156,8 +163,12 @@ internal class ExportPrivatePortableDraftWriter(
         if (!Files.isRegularFile(snapshotFile, LinkOption.NOFOLLOW_LINKS) ||
             Files.size(snapshotFile) > limits.maxMetadataBytes
         ) throw IOException("Unsafe private snapshot")
+        val snapshotBytes = Files.readAllBytes(snapshotFile)
+        if (shaBytes(snapshotBytes) != expected.snapshotSha256) {
+            throw IOException("Private snapshot digest changed during restart inspection")
+        }
         val model = modelFor(expected, Json.parseToJsonElement(
-            Files.readAllBytes(snapshotFile).toString(Charsets.UTF_8),
+            snapshotBytes.toString(Charsets.UTF_8),
         ).jsonObject)
         val draft = stage.resolve("draft.notebook")
         if (!Files.isRegularFile(draft, LinkOption.NOFOLLOW_LINKS)) {
