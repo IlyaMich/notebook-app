@@ -345,6 +345,83 @@ class ExportRetainedPrivateCopyAndroidTest {
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
     }
 
+    private suspend fun retainReadyForUserDocument(operationId: String) {
+        assertTrue(coordinator().stage(
+            operationId, SnapshotRequest(noteId, snapLimits), copyLimits, 123L,
+        ) is ExportRetainedPrivateCopyCoordinator.Result.StagedUntrusted)
+        val bound = ExportBoundPrivateStageRecovery(
+            db, root, stageLimits,
+        ).inspectReadOnly(operationId) as
+            ExportBoundPrivateStageRecovery.Result.BoundStageUntrusted
+        ExportPrivatePortableDraftWriter(
+            root, stageLimits, ExportAndroidDirectorySync::syncOrThrow,
+        ).writeDraft(bound.observation)
+        val retained = ExportHoldAdmissionComposition.independentPrivateArchiveForRoom(
+            root, db, stageLimits,
+        ).retainPrivateCopy(operationId)
+        assertTrue(retained is ExportIndependentPrivateArchiveCoordinator.Result.PrivateCopyObservedUntrusted)
+    }
+
+    @Test fun completeRoomBoundExternalByteRereadNeverReleasesOriginalOrHold() = runBlocking {
+        val originalBytes = imageBytes()
+        val (asset, original) = registerImage(originalBytes)
+        val operationId = id()
+        retainReadyForUserDocument(operationId)
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        val external = ByteArrayOutputStream()
+        val dest = object : ExportExternalDocumentDestination {
+            override fun openWriteOnce(): ExportExternalDocumentDestination.Sink =
+                object : ExportExternalDocumentDestination.Sink {
+                    override val output = external
+                    override fun syncOrThrow() {}
+                    override fun close() { output.flush() }
+                }
+            override fun openReadBack(): java.io.InputStream =
+                java.io.ByteArrayInputStream(external.toByteArray())
+        }
+        val result = ExportHoldAdmissionComposition.safPublicationForRoom(
+            root, db, stageLimits,
+        ).publishToFreshUserDocument(operationId, dest)
+        assertTrue(result is ExportSafPublicationCoordinator.Result.ExternalBytesObservedUntrusted)
+        val archive = File(root, "retained-private-export-archives/" + operationId + ".notebook")
+        assertArrayEquals(archive.readBytes(), external.toByteArray())
+        assertEquals(listOf(asset),
+            db.exportHoldAdmissionDao().listHolds(operationId).map { it.assetId })
+        assertNotNull(db.exportHoldAdmissionDao().findSourceBinding(operationId))
+        assertArrayEquals(originalBytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun externalReadbackCorruptionDoesNotChangeOriginalOrCommittedPins() = runBlocking {
+        val originalBytes = imageBytes()
+        val (asset, original) = registerImage(originalBytes)
+        val operationId = id()
+        retainReadyForUserDocument(operationId)
+        val external = ByteArrayOutputStream()
+        val corrupt = object : ExportExternalDocumentDestination {
+            override fun openWriteOnce(): ExportExternalDocumentDestination.Sink =
+                object : ExportExternalDocumentDestination.Sink {
+                    override val output = external
+                    override fun syncOrThrow() {}
+                    override fun close() { output.flush() }
+                }
+            override fun openReadBack(): java.io.InputStream =
+                java.io.ByteArrayInputStream(external.toByteArray().reversedArray())
+        }
+        val failure = runCatching {
+            ExportHoldAdmissionComposition.safPublicationForRoom(
+                root, db, stageLimits,
+            ).publishToFreshUserDocument(operationId, corrupt)
+        }.exceptionOrNull()
+        assertTrue(failure is IOException)
+        assertEquals(listOf(asset),
+            db.exportHoldAdmissionDao().listHolds(operationId).map { it.assetId })
+        assertNotNull(db.exportHoldAdmissionDao().findSourceBinding(operationId))
+        assertArrayEquals(originalBytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
     @Test fun trashedNoteRejectsBeforeCreatingPinsOrStage() = runBlocking {
         val bytes = imageBytes()
         val (_, original) = registerImage(bytes)
