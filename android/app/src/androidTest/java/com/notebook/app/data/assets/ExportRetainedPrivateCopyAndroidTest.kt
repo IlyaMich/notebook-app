@@ -345,6 +345,175 @@ class ExportRetainedPrivateCopyAndroidTest {
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
     }
 
+    private suspend fun retainReadyForUserDocument(operationId: String) {
+        assertTrue(coordinator().stage(
+            operationId, SnapshotRequest(noteId, snapLimits), copyLimits, 123L,
+        ) is ExportRetainedPrivateCopyCoordinator.Result.StagedUntrusted)
+        val bound = ExportBoundPrivateStageRecovery(
+            db, root, stageLimits,
+        ).inspectReadOnly(operationId) as
+            ExportBoundPrivateStageRecovery.Result.BoundStageUntrusted
+        ExportPrivatePortableDraftWriter(
+            root, stageLimits, ExportAndroidDirectorySync::syncOrThrow,
+        ).writeDraft(bound.observation)
+        val retained = ExportHoldAdmissionComposition.independentPrivateArchiveForRoom(
+            root, db, stageLimits,
+        ).retainPrivateCopy(operationId)
+        assertTrue(retained is ExportIndependentPrivateArchiveCoordinator.Result.PrivateCopyObservedUntrusted)
+    }
+
+    @Test fun completeRoomBoundExternalByteRereadNeverReleasesOriginalOrHold() = runBlocking {
+        val originalBytes = imageBytes()
+        val (asset, original) = registerImage(originalBytes)
+        val operationId = id()
+        retainReadyForUserDocument(operationId)
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        val external = ByteArrayOutputStream()
+        val dest = object : ExportExternalDocumentDestination {
+            override val destinationIdentitySha256: String = "1".repeat(64)
+            override fun openWriteOnce(): ExportExternalDocumentDestination.Sink =
+                object : ExportExternalDocumentDestination.Sink {
+                    override val output = external
+                    override fun syncOrThrow() {}
+                    override fun close() { output.flush() }
+                }
+            override fun openReadBack(): java.io.InputStream =
+                java.io.ByteArrayInputStream(external.toByteArray())
+        }
+        val result = ExportHoldAdmissionComposition.safPublicationForRoom(
+            root, db, stageLimits,
+        ).publishToFreshUserDocument(operationId, dest)
+        assertTrue(result is ExportSafPublicationCoordinator.Result.ExternalBytesObservedUntrusted)
+        assertTrue(ExportExternalAttemptJournal(db, stageLimits).inspectReadOnly(operationId)
+            is ExportExternalAttemptJournal.Recovery.ReadbackObservedUntrusted)
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        assertTrue(ExportExternalAttemptJournal(db, stageLimits).inspectReadOnly(operationId)
+            is ExportExternalAttemptJournal.Recovery.ReadbackObservedUntrusted)
+        val archive = File(root, "retained-private-export-archives/" + operationId + ".notebook")
+        assertArrayEquals(archive.readBytes(), external.toByteArray())
+        assertEquals(listOf(asset),
+            db.exportHoldAdmissionDao().listHolds(operationId).map { it.assetId })
+        assertNotNull(db.exportHoldAdmissionDao().findSourceBinding(operationId))
+        assertArrayEquals(originalBytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun externalReadbackCorruptionDoesNotChangeOriginalOrCommittedPins() = runBlocking {
+        val originalBytes = imageBytes()
+        val (asset, original) = registerImage(originalBytes)
+        val operationId = id()
+        retainReadyForUserDocument(operationId)
+        val external = ByteArrayOutputStream()
+        val corrupt = object : ExportExternalDocumentDestination {
+            override val destinationIdentitySha256: String = "1".repeat(64)
+            override fun openWriteOnce(): ExportExternalDocumentDestination.Sink =
+                object : ExportExternalDocumentDestination.Sink {
+                    override val output = external
+                    override fun syncOrThrow() {}
+                    override fun close() { output.flush() }
+                }
+            override fun openReadBack(): java.io.InputStream =
+                java.io.ByteArrayInputStream(external.toByteArray().reversedArray())
+        }
+        val failure = runCatching {
+            ExportHoldAdmissionComposition.safPublicationForRoom(
+                root, db, stageLimits,
+            ).publishToFreshUserDocument(operationId, corrupt)
+        }.exceptionOrNull()
+        assertTrue(failure is IOException)
+        assertTrue(ExportExternalAttemptJournal(db, stageLimits).inspectReadOnly(operationId)
+            is ExportExternalAttemptJournal.Recovery.AttemptPendingUntrusted)
+        assertEquals(listOf(asset),
+            db.exportHoldAdmissionDao().listHolds(operationId).map { it.assetId })
+        assertNotNull(db.exportHoldAdmissionDao().findSourceBinding(operationId))
+        assertArrayEquals(originalBytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun interruptedProviderAttemptSurvivesRoomReopenAndBlocksSecondWrite() = runBlocking {
+        val bytes = imageBytes()
+        val (asset, original) = registerImage(bytes)
+        val operationId = id()
+        retainReadyForUserDocument(operationId)
+        val privateCopy = ExportHoldAdmissionComposition.independentPrivateArchiveForRoom(
+            root, db, stageLimits,
+        ).inspectPrivateCopyReadOnly(operationId) as
+            ExportIndependentPrivateArchiveCoordinator.Result.PrivateCopyObservedUntrusted
+        val journal = ExportExternalAttemptJournal(db, stageLimits)
+        assertTrue(journal.beginOnce(
+            privateCopy.archive, "2".repeat(64),
+        ) is ExportExternalAttemptJournal.Admission.Recorded)
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        assertTrue(ExportExternalAttemptJournal(db, stageLimits).inspectReadOnly(operationId)
+            is ExportExternalAttemptJournal.Recovery.AttemptPendingUntrusted)
+
+        var opens = 0
+        val destination = object : ExportExternalDocumentDestination {
+            override val destinationIdentitySha256 = "2".repeat(64)
+            override fun openWriteOnce(): ExportExternalDocumentDestination.Sink {
+                opens++
+                throw IOException("Duplicate attempt must never reach provider")
+            }
+            override fun openReadBack(): java.io.InputStream {
+                opens++
+                throw IOException("Duplicate attempt must not read provider")
+            }
+        }
+        assertTrue(ExportHoldAdmissionComposition.safPublicationForRoom(
+            root, db, stageLimits,
+        ).publishToFreshUserDocument(operationId, destination)
+            is ExportSafPublicationCoordinator.Result.Incomplete)
+        assertEquals(0, opens)
+        assertEquals(listOf(asset),
+            db.exportHoldAdmissionDao().listHolds(operationId).map { it.assetId })
+        assertArrayEquals(bytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun journalSqlRejectsForgedObservationAndMutableHistory() = runBlocking {
+        val bytes = imageBytes()
+        val (asset, original) = registerImage(bytes)
+        val operationId = id()
+        retainReadyForUserDocument(operationId)
+        val privateCopy = ExportHoldAdmissionComposition.independentPrivateArchiveForRoom(
+            root, db, stageLimits,
+        ).inspectPrivateCopyReadOnly(operationId) as
+            ExportIndependentPrivateArchiveCoordinator.Result.PrivateCopyObservedUntrusted
+        val journal = ExportExternalAttemptJournal(db, stageLimits)
+        assertTrue(journal.beginOnce(privateCopy.archive, "3".repeat(64))
+            is ExportExternalAttemptJournal.Admission.Recorded)
+        val raw = db.openHelper.writableDatabase
+        assertNotNull(runCatching {
+            raw.execSQL(
+                "INSERT INTO export_external_readback_observations " +
+                    "(operation_id,observed_sha256,observed_bytes,observed_at_ms,observation_version) " +
+                    "VALUES (?,?,?,?,1)",
+                arrayOf(operationId, "f".repeat(64), privateCopy.archive.bytes, System.currentTimeMillis()),
+            )
+        }.exceptionOrNull())
+        assertNotNull(runCatching {
+            raw.execSQL(
+                "DELETE FROM export_external_handoff_attempts WHERE operation_id=?",
+                arrayOf(operationId),
+            )
+        }.exceptionOrNull())
+        assertNotNull(runCatching {
+            raw.execSQL(
+                "UPDATE export_external_handoff_attempts SET attempted_at_ms=0 WHERE operation_id=?",
+                arrayOf(operationId),
+            )
+        }.exceptionOrNull())
+        assertTrue(journal.inspectReadOnly(operationId) is
+            ExportExternalAttemptJournal.Recovery.AttemptPendingUntrusted)
+        assertEquals(listOf(asset),
+            db.exportHoldAdmissionDao().listHolds(operationId).map { it.assetId })
+        assertArrayEquals(bytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
     @Test fun trashedNoteRejectsBeforeCreatingPinsOrStage() = runBlocking {
         val bytes = imageBytes()
         val (_, original) = registerImage(bytes)

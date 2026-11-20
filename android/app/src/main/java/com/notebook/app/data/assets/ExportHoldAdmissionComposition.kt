@@ -106,6 +106,34 @@ internal object ExportHoldAdmissionComposition {
         )
     }
 
+    /**
+     * Explicitly invoked export-provider seam only: caller first launches
+     * ACTION_CREATE_DOCUMENT and passes its fresh user-approved result URI.
+     * No automatic UI/intent dispatch, completion receipt, release or GC.
+     */
+    fun safPublicationForApplication(
+        context: Context,
+        stageLimits: ExportPrivateStageLimits,
+    ): ExportSafPublicationCoordinator {
+        val app = context.applicationContext
+        return safPublicationForRoom(
+            app.filesDir, AppDatabaseProvider.get(app), stageLimits,
+        )
+    }
+
+    internal fun safPublicationForRoom(
+        privateFilesDir: File,
+        db: AppDatabase,
+        stageLimits: ExportPrivateStageLimits,
+    ): ExportSafPublicationCoordinator =
+        ExportSafPublicationCoordinator(
+            privateArchive = independentPrivateArchiveForRoom(
+                privateFilesDir, db, stageLimits,
+            ),
+            bytes = ExportExternalDocumentByteHandoff(privateFilesDir, stageLimits),
+            journal = ExportExternalAttemptJournal(db, stageLimits),
+        )
+
     /** Allows isolated Room verification without accessing the application's library.sqlite. */
     internal fun forRoom(privateFilesDir: File, db: AppDatabase): ExportAtomicHoldAdmission {
         val coordinator = AssetAcquisitionLeaseCoordinator(privateFilesDir)
