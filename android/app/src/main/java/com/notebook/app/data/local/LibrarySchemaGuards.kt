@@ -50,6 +50,7 @@ internal object LibrarySchemaGuards {
             AssetReferenceIndexGuards.initializeEmptyIndex(db)
             ExportHoldSchemaGuards.install(db)
             ExportHoldSchemaGuards.installSourceBindings(db)
+            ExportHoldSchemaGuards.installExternalObservations(db)
         }
     }
 }
