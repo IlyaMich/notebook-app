@@ -1,5 +1,7 @@
 package com.notebook.app.data.assets
 
+import android.content.Context
+import android.net.Uri
 import java.io.IOException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -26,6 +28,19 @@ internal class ExportSafPublicationCoordinator(
         ) : Result
         data class Incomplete(val reason: String) : Result
     }
+
+    /**
+     * Call only with a URI freshly returned by ACTION_CREATE_DOCUMENT after an
+     * explicit user action. Does not persist URI grants or certify provider
+     * crash durability. An old URI is not a safe replacement target.
+     */
+    suspend fun publishToSelectedSafDocument(
+        operationId: String,
+        context: Context,
+        freshSelectedUri: Uri,
+    ): Result = publishToFreshUserDocument(
+        operationId, ExportSafCreatedDocumentDestination(context, freshSelectedUri),
+    )
 
     suspend fun publishToFreshUserDocument(
         operationId: String,
