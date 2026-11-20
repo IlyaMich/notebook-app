@@ -136,6 +136,46 @@ internal class ExportPrivatePortableDraftWriter(
             "draft.notebook", size, digest)
     }
 
+    /**
+     * Diagnostic-only restart inspection. No writes, stage adoption, receipt,
+     * release or GC decision. The caller's expected snapshot hashes are still
+     * untrusted unless independently persisted and authenticated elsewhere.
+     */
+    suspend fun inspectExistingDraftReadOnly(
+        expected: ExportUntrustedPrivateStageObservation,
+    ): DraftUntrusted = withContext(Dispatchers.IO) {
+        currentCoroutineContext().ensureActive()
+        val stageResult = ExportPrivateStageReadOnlyVerifier(
+            root.toFile(), limits,
+        ).inspect(expected)
+        if (stageResult !is ExportPrivateStageReadOnlyVerifier.Assessment.MatchedUntrusted) {
+            throw IOException("Private source stage failed read-only inspection")
+        }
+        val stage = stageRoot.resolve(expected.operationId)
+        val snapshotFile = stage.resolve("snapshot.json")
+        if (!Files.isRegularFile(snapshotFile, LinkOption.NOFOLLOW_LINKS) ||
+            Files.size(snapshotFile) > limits.maxMetadataBytes
+        ) throw IOException("Unsafe private snapshot")
+        val model = modelFor(expected, Json.parseToJsonElement(
+            Files.readAllBytes(snapshotFile).toString(Charsets.UTF_8),
+        ).jsonObject)
+        val draft = stage.resolve("draft.notebook")
+        if (!Files.isRegularFile(draft, LinkOption.NOFOLLOW_LINKS)) {
+            throw IOException("Missing or unsafe private archive draft")
+        }
+        val maxArchiveBytes = limits.maxTotalAssetBytes + 2L * limits.maxMetadataBytes +
+            1024L * (limits.maxAssets + 128L)
+        val bytes = Files.size(draft)
+        if (bytes <= 0L || bytes > maxArchiveBytes) {
+            throw IOException("Private draft exceeds read-only budget")
+        }
+        validateDraft(draft.toFile(), model)
+        val hash = shaFile(draft)
+        currentCoroutineContext().ensureActive()
+        DraftUntrusted(expected.operationId, expected.noteId, expected.noteRevision,
+            "draft.notebook", bytes, hash)
+    }
+
     private data class Model(
         val manifest: ByteArray,
         val pages: List<Pair<String, ByteArray>>,
