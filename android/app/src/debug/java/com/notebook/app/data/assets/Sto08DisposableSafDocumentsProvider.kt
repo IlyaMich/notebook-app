@@ -51,6 +51,7 @@ internal class Sto08DisposableSafDocumentsProvider : DocumentsProvider() {
         val id = when {
             documentId.startsWith("doc-") -> documentId.removePrefix("doc-")
             documentId.startsWith("deny-") -> documentId.removePrefix("deny-")
+            documentId.startsWith("readfail-") -> documentId.removePrefix("readfail-")
             else -> throw FileNotFoundException("Unknown disposable document ID")
         }
         if (runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false).not()) {
@@ -100,7 +101,8 @@ internal class Sto08DisposableSafDocumentsProvider : DocumentsProvider() {
         return MatrixCursor(keys).apply {
             dir().listFiles()?.filter { f ->
                 f.isFile && !Files.isSymbolicLink(f.toPath()) &&
-                    (f.name.startsWith("doc-") || f.name.startsWith("deny-")) &&
+                    (f.name.startsWith("doc-") || f.name.startsWith("deny-") ||
+                        f.name.startsWith("readfail-")) &&
                     runCatching { file(f.name) }.isSuccess
             }?.forEach { addDocument(this, keys, it.name) }
         }
@@ -146,8 +148,12 @@ internal class Sto08DisposableSafDocumentsProvider : DocumentsProvider() {
         if (parentDocumentId != ROOT_ID || mimeType != MIME ||
             !displayName.startsWith("sto08-")
         ) throw FileNotFoundException("Only explicit disposable test creations are accepted")
-        val name = (if (displayName.startsWith("sto08-deny-write-")) "deny-" else "doc-") +
-            UUID.randomUUID().toString()
+        val prefix = when {
+            displayName.startsWith("sto08-deny-write-") -> "deny-"
+            displayName.startsWith("sto08-deny-readback-") -> "readfail-"
+            else -> "doc-"
+        }
+        val name = prefix + UUID.randomUUID().toString()
         Files.createFile(file(name).toPath())
         return name
     }
@@ -159,6 +165,9 @@ internal class Sto08DisposableSafDocumentsProvider : DocumentsProvider() {
     ): ParcelFileDescriptor {
         if (documentId.startsWith("deny-") && mode.contains('w')) {
             throw FileNotFoundException("Injected disposable provider write refusal")
+        }
+        if (documentId.startsWith("readfail-") && mode.contains('r')) {
+            throw FileNotFoundException("Injected disposable provider readback refusal")
         }
         val target = file(documentId)
         if (!Files.isRegularFile(target.toPath(), LinkOption.NOFOLLOW_LINKS)) {
