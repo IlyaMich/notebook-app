@@ -231,6 +231,69 @@ class ExportAtomicHoldAdmissionAndroidTest {
         assertEquals(1 to 1, count())
     }
 
+    @Test fun immutableV6BindingMatchesExactlyCapturedSnapshotAndPinSetAfterReopen() = runBlocking {
+        val first = addImage()
+        val second = addImage()
+        val operation = id()
+        assertEquals(
+            ExportAtomicHoldResult.Committed(operation, listOf(first, second).sorted()),
+            persist(operation),
+        )
+        val stored = db.exportHoldAdmissionDao().findSourceBinding(operation)!!
+        val captured = ExportSourceSnapshotReader(db).capture(
+            SnapshotRequest(noteId, limits),
+        ) as SnapshotResult.Complete
+        assertEquals(ExportSourceBindingDigests.sha256(
+            ExportSourceBindingDigests.snapshot(operation, captured)), stored.snapshotSha256)
+        assertEquals(ExportSourceBindingDigests.assetSetDigest(captured.assets), stored.assetSetSha256)
+        assertEquals(2, stored.expectedAssetCount)
+        assertEquals(20L, stored.expectedAssetBytes)
+        assertEquals(1, stored.bindingVersion)
+        assertEquals(2, db.exportHoldAdmissionDao().findOperation(operation)!!.protocolVersion)
+
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        assertEquals(stored, db.exportHoldAdmissionDao().findSourceBinding(operation))
+        assertEquals(listOf(first, second).sorted(),
+            db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun v6SourceBindingAndHoldCannotBeUpdatedOrDeleted() = runBlocking {
+        val asset = addImage()
+        val operation = id()
+        assertTrue(persist(operation) is ExportAtomicHoldResult.Committed)
+        val raw = db.openHelper.writableDatabase
+        val old = db.exportHoldAdmissionDao().findSourceBinding(operation)!!
+        assertNotNull(runCatching {
+            raw.execSQL("UPDATE export_source_bindings SET expected_asset_count=0 WHERE operation_id=?",
+                arrayOf(operation))
+        }.exceptionOrNull())
+        assertNotNull(runCatching {
+            raw.execSQL("DELETE FROM export_source_bindings WHERE operation_id=?", arrayOf(operation))
+        }.exceptionOrNull())
+        assertNotNull(runCatching {
+            raw.execSQL("DELETE FROM export_asset_holds WHERE operation_id=?", arrayOf(operation))
+        }.exceptionOrNull())
+        assertEquals(old, db.exportHoldAdmissionDao().findSourceBinding(operation))
+        assertEquals(listOf(asset),
+            db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun failedV6AdmissionRollsBackSourceBindingWithAllPins() = runBlocking {
+        addImage()
+        addImage()
+        val operation = id()
+        val writer = ExportAtomicHoldAdmission(db, lease, afterHoldInserted = { count ->
+            if (count == 1) throw java.io.IOException("simulated pin transaction interruption")
+        })
+        assertTrue(runCatching { persist(operation, writer) }.exceptionOrNull() is java.io.IOException)
+        assertNull(db.exportHoldAdmissionDao().findSourceBinding(operation))
+        assertNull(db.exportHoldAdmissionDao().findOperation(operation))
+        assertEquals(0 to 0, count())
+    }
+
     /** B6: two retained holds survive a synthetic deleted-note state and Room reopen. */
     @Test fun twoIndependentHoldsSurviveDeletedNoteStateAndDatabaseReopen() = runBlocking {
         val asset = addImage()
