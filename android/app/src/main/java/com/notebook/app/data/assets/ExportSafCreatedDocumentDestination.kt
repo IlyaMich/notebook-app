@@ -7,6 +7,7 @@ import android.provider.DocumentsContract
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -26,6 +27,10 @@ internal class ExportSafCreatedDocumentDestination(
 ) : ExportExternalDocumentDestination {
     private val app = context.applicationContext
     private val resolver = app.contentResolver
+    override val destinationIdentitySha256: String =
+        MessageDigest.getInstance("SHA-256").digest(
+            documentUri.toString().toByteArray(Charsets.UTF_8),
+        ).joinToString("") { "%02x".format(it.toInt() and 255) }
     private val attempted = AtomicBoolean(false)
 
     init {
