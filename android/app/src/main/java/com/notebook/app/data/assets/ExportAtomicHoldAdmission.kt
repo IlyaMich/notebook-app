@@ -95,7 +95,7 @@ internal class ExportAtomicHoldAdmission(
                         // Assert the exact committed set inside this same transaction.
                         val actual = dao.listHolds(operationId).map { it.assetId }
                         check(actual == ids.sorted()) { "Incomplete or unexpected export hold set" }
-                        ExportAtomicHoldCaptureResult.Committed(operationId, actual, plan)
+                        ExportAtomicHoldCaptureResult.Committed(operationId, actual, plan, source)
                     }
                 }
             }
@@ -107,6 +107,7 @@ internal sealed interface ExportAtomicHoldCaptureResult {
         val operationId: String,
         val assetIds: List<String>,
         val plan: ExportCopyAdmissionPlan,
+        val snapshot: SnapshotResult.Complete,
     ) : ExportAtomicHoldCaptureResult
     data class Rejected(val reason: SnapshotRejection) : ExportAtomicHoldCaptureResult
 }
