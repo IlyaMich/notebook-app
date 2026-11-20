@@ -190,6 +190,80 @@ class ExportRetainedPrivateCopyAndroidTest {
         assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
     }
 
+    @Test fun recoveryDerivesExactPinnedCopyExpectationsFromRoomV6WithoutCallerClaim() = runBlocking {
+        val bytes = imageBytes()
+        val (asset, original) = registerImage(bytes)
+        val operation = id()
+        val result = coordinator().stage(operation, SnapshotRequest(noteId, snapLimits),
+            copyLimits, 123L)
+        assertTrue(result is ExportRetainedPrivateCopyCoordinator.Result.StagedUntrusted)
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+
+        val recovery = ExportBoundPrivateStageRecovery(db, root, stageLimits)
+        val first = recovery.inspectReadOnly(operation)
+        assertTrue(first is ExportBoundPrivateStageRecovery.Result.BoundStageUntrusted)
+        val expectation = (first as ExportBoundPrivateStageRecovery.Result.BoundStageUntrusted).observation
+        assertEquals(listOf(asset), expectation.copies.map { it.assetId })
+        assertNull(first.draft)
+        ExportPrivatePortableDraftWriter(
+            root, stageLimits, ExportAndroidDirectorySync::syncOrThrow,
+        ).writeDraft(expectation)
+        val second = recovery.inspectReadOnly(operation)
+        assertTrue(second is ExportBoundPrivateStageRecovery.Result.BoundStageUntrusted)
+        assertNotNull((second as ExportBoundPrivateStageRecovery.Result.BoundStageUntrusted).draft)
+        assertEquals(listOf(asset), db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+        assertArrayEquals(bytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun immutableRoomBindingRejectsTamperedCopyAndRetainsOriginal() = runBlocking {
+        val bytes = imageBytes()
+        val (asset, original) = registerImage(bytes)
+        val operation = id()
+        val result = coordinator().stage(operation, SnapshotRequest(noteId, snapLimits),
+            copyLimits, 123L)
+        assertTrue(result is ExportRetainedPrivateCopyCoordinator.Result.StagedUntrusted)
+        db.close()
+        db = AppDatabaseProvider.openIsolated(context, name)
+        val stageFile = File(root, "pending-export-copies/" + operation +
+            "/asset-" + asset + ".bin")
+        stageFile.writeBytes(bytes.reversedArray()) // disposable export-owned test fixture only
+        val recovery = ExportBoundPrivateStageRecovery(db, root, stageLimits)
+        assertEquals(
+            ExportBoundPrivateStageRecovery.Result.Incomplete(
+                ExportBoundPrivateStageRecovery.Stop.STAGE_INTEGRITY_FAILED),
+            recovery.inspectReadOnly(operation),
+        )
+        assertNotNull(db.exportHoldAdmissionDao().findSourceBinding(operation))
+        assertEquals(listOf(asset), db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+        assertArrayEquals(bytes, original.readBytes())
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
+    @Test fun unknownAndLegacyUnboundExportOperationsAreNeverAdopted() = runBlocking {
+        assertEquals(
+            ExportBoundPrivateStageRecovery.Result.Incomplete(
+                ExportBoundPrivateStageRecovery.Stop.LEGACY_UNBOUND),
+            ExportBoundPrivateStageRecovery(db, root, stageLimits).inspectReadOnly(id()),
+        )
+        val legacy = id()
+        db.exportHoldAdmissionDao().insertOperation(
+            com.notebook.app.data.local.entity.ExportOperationEntity(
+                operationId = legacy, noteId = noteId, noteRevision = 2L,
+                state = "COMMITTED_PIN_SET", createdAtMillis = 1L, updatedAtMillis = 1L,
+                protocolVersion = 1,
+            ),
+        )
+        assertEquals(
+            ExportBoundPrivateStageRecovery.Result.Incomplete(
+                ExportBoundPrivateStageRecovery.Stop.LEGACY_UNBOUND),
+            ExportBoundPrivateStageRecovery(db, root, stageLimits).inspectReadOnly(legacy),
+        )
+        assertNull(db.exportHoldAdmissionDao().findSourceBinding(legacy))
+        assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+    }
+
     @Test fun trashedNoteRejectsBeforeCreatingPinsOrStage() = runBlocking {
         val bytes = imageBytes()
         val (_, original) = registerImage(bytes)
