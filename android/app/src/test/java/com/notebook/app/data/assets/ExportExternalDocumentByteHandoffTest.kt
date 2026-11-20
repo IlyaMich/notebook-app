@@ -50,6 +50,7 @@ class ExportExternalDocumentByteHandoffTest {
         private val failSync: Boolean = false,
         private val failAtBytes: Int? = null,
     ) : ExportExternalDocumentDestination {
+        override val destinationIdentitySha256: String = "1".repeat(64)
         val outputBytes = ByteArrayOutputStream()
         var writes = 0
         var syncs = 0
