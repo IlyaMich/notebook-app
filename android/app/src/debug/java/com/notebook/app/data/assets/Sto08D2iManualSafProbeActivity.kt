@@ -230,7 +230,7 @@ internal class Sto08D2iManualSafProbeActivity : ComponentActivity() {
         }
         randomBytes.fill(0)
         val bytes = file.readBytes()
-        if (bytes.size.toLong() !in 1..Sto08D2iManualSafProbeJournal.MAX_PROBE_BYTES) {
+        if (bytes.size.toLong() !in 1L..Sto08D2iManualSafProbeJournal.MAX_PROBE_BYTES) {
             throw IOException("Debug probe archive exceeds strict test-only budget")
         }
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
