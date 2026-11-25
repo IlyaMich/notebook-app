@@ -160,9 +160,8 @@ internal class ExportRoomBoundHandoffCoordinator(
     ): Handoff = try {
         currentCoroutineContext().ensureActive()
         if (!ExportSourceBindingDigests.canonicalUuid(operationId)) {
-            return Handoff.AttemptOutcomeUnknownUntrusted(operationId)
-        }
-        when (saf.publishToSelectedSafDocument(operationId, context, freshSelectedUri)) {
+            Handoff.AttemptOutcomeUnknownUntrusted(operationId)
+        } else when (saf.publishToSelectedSafDocument(operationId, context, freshSelectedUri)) {
             is ExportSafPublicationCoordinator.Result.ExternalBytesObservedUntrusted ->
                 Handoff.ReadbackObservedUntrusted(operationId)
             is ExportSafPublicationCoordinator.Result.Incomplete ->
@@ -182,9 +181,8 @@ internal class ExportRoomBoundHandoffCoordinator(
     ): Handoff = try {
         currentCoroutineContext().ensureActive()
         if (!ExportSourceBindingDigests.canonicalUuid(operationId)) {
-            return Handoff.AttemptOutcomeUnknownUntrusted(operationId)
-        }
-        when (saf.publishToFreshUserDocument(operationId, destination)) {
+            Handoff.AttemptOutcomeUnknownUntrusted(operationId)
+        } else when (saf.publishToFreshUserDocument(operationId, destination)) {
             is ExportSafPublicationCoordinator.Result.ExternalBytesObservedUntrusted ->
                 Handoff.ReadbackObservedUntrusted(operationId)
             is ExportSafPublicationCoordinator.Result.Incomplete ->
