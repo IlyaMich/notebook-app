@@ -111,6 +111,24 @@ internal class Sto08D3aReadOnlyOwnershipPreflight(
             if (final !is Capture.Ready || final != initial) {
                 return@withLease Result.Incomplete(Reason.CHANGED_DURING_INSPECTION)
             }
+            // A second exact-byte pass catches fixture or non-cooperating file
+            // changes observed during the first pass. Still never a stable
+            // eligibility certificate: arbitrary writers may mutate afterward.
+            for (row in initial.assets) {
+                currentCoroutineContext().ensureActive()
+                val rechecked = try {
+                    verifier.verify(row.id)
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (_: Exception) {
+                    return@withLease Result.Incomplete(Reason.CHANGED_DURING_INSPECTION)
+                }
+                if (rechecked.assetId != row.id ||
+                    rechecked.sha256 != row.sha256 ||
+                    rechecked.byteSize != row.byteSize ||
+                    rechecked.mimeType != row.mimeType
+                ) return@withLease Result.Incomplete(Reason.CHANGED_DURING_INSPECTION)
+            }
             currentCoroutineContext().ensureActive()
             Result.ObservedConsistentUntrusted(
                 activeOwners = initial.scan.canonical.owners.count { !it.inTrash },
