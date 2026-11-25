@@ -12,6 +12,7 @@ import com.notebook.app.data.local.entity.NotebookEntity
 import com.notebook.app.data.local.entity.PageAssetReferenceEntity
 import com.notebook.app.data.local.entity.PageEntity
 import java.io.File
+import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
@@ -187,6 +188,34 @@ class Sto08D3aReadOnlyOwnershipPreflightAndroidTest {
         ), preflight().inspect())
         assertFalse(original.exists())
         assertProtected()
+    }
+
+    @Test fun symbolicLinkOriginalIsNotFollowedOrAccepted() = runBlocking {
+        val (asset, linkedFile) = pdfAsset("symlink target", writeOriginal = false)
+        assertTrue(linkedFile.parentFile!!.mkdirs())
+        val outsideAssetTree = File(root, "isolated-symlink-test-target.pdf")
+        outsideAssetTree.writeBytes(pdfBytes("symlink target"))
+        Files.createSymbolicLink(linkedFile.toPath(), outsideAssetTree.toPath())
+        val p = page(asset)
+        db.assetOwnershipDao().insertPageReference(PageAssetReferenceEntity(p, asset))
+        assertEquals(Sto08D3aReadOnlyOwnershipPreflight.Result.Incomplete(
+            Sto08D3aReadOnlyOwnershipPreflight.Reason.FILE_INTEGRITY_OR_ACCESS_FAILURE,
+        ), preflight().inspect())
+        assertTrue(Files.isSymbolicLink(linkedFile.toPath()))
+        assertArrayEquals(pdfBytes("symlink target"), outsideAssetTree.readBytes())
+        assertProtected()
+    }
+
+    @Test fun unresolvedOwnershipGateNeverReturnsObservedConsistency() = runBlocking {
+        val (_, original) = pdfAsset("unresolved gate")
+        db.openHelper.writableDatabase.execSQL(
+            "UPDATE asset_reference_index_state SET state = 'UNRESOLVED' WHERE id = 1",
+        )
+        assertEquals(Sto08D3aReadOnlyOwnershipPreflight.Result.Incomplete(
+            Sto08D3aReadOnlyOwnershipPreflight.Reason.UNKNOWN_GATE_STATE,
+        ), preflight().inspect())
+        assertEquals("UNRESOLVED", db.assetOwnershipDao().readFailClosedGateStatus())
+        assertArrayEquals(pdfBytes("unresolved gate"), original.readBytes())
     }
 
     @Test fun assetScanBudgetExceededNeverReturnsConsistency() = runBlocking {
