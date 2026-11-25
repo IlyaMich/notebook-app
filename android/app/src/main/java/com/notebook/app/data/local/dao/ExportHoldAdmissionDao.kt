@@ -54,6 +54,17 @@ public interface ExportHoldAdmissionDao {
     @Query("SELECT * FROM export_operations ORDER BY operation_id ASC LIMIT :rowLimit")
     suspend fun listRecoveryOperations(rowLimit: Int): List<ExportOperationEntity>
 
+    /**
+     * D2J-B: read-only note-scoped export history for conservative UI display.
+     * The caller always applies a plus-one limit and rejects overflow; no
+     * provider URI, original bytes or private staging path is returned.
+     */
+    @Query("""
+        SELECT * FROM export_operations WHERE note_id = :noteId
+        ORDER BY created_at_ms DESC, operation_id DESC LIMIT :rowLimit
+    """)
+    suspend fun listNoteExportOperationsBounded(noteId: String, rowLimit: Int): List<ExportOperationEntity>
+
     /** LEFT JOIN deliberately preserves missing assets/operations for fail-closed diagnostics. */
     @Query("""SELECT h.operation_id AS operation_id, h.asset_id AS asset_id,
            op.operation_id AS operation_present_id, a.id AS asset_present_id,
