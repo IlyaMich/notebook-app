@@ -96,7 +96,7 @@ internal class Sto08D2iManualSafProbeJournal(
             .getOrDefault(false) &&
             HEX.matches(attempt.expectedSha256) &&
             HEX.matches(attempt.destinationIdentitySha256) &&
-            attempt.expectedBytes in 1..MAX_PROBE_BYTES
+            attempt.expectedBytes in 1L..MAX_PROBE_BYTES
 
     internal companion object {
         const val MAX_PROBE_BYTES = 256L * 1024L
