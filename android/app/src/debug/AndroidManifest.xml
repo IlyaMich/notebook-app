@@ -38,6 +38,20 @@
       </intent-filter>
     </activity>
 
+    <!-- STO-08 D2H: DEBUG ONLY Android DocumentsProvider integration fixture.
+         Protected by system-only MANAGE_DOCUMENTS, not shipped in release.
+         All bytes are isolated under sto08_disposable_saf_test_documents. -->
+    <provider
+      android:name="com.notebook.app.data.assets.Sto08DisposableSafDocumentsProvider"
+      android:authorities="org.notebook.sto08.disposable.saf.documents"
+      android:exported="true"
+      android:grantUriPermissions="true"
+      android:permission="android.permission.MANAGE_DOCUMENTS">
+      <intent-filter>
+        <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+      </intent-filter>
+    </provider>
+
     <!-- STO-08 C2C-2C: debug-only, non-exported cross-process lock probe. -->
     <service
       android:name="com.notebook.app.data.assets.AssetLeaseCrossProcessProbeService"

@@ -3,6 +3,8 @@ package com.notebook.app.data.assets
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.notebook.app.data.local.AppDatabase
@@ -360,6 +362,151 @@ class ExportRetainedPrivateCopyAndroidTest {
             root, db, stageLimits,
         ).retainPrivateCopy(operationId)
         assertTrue(retained is ExportIndependentPrivateArchiveCoordinator.Result.PrivateCopyObservedUntrusted)
+    }
+
+    /**
+     * A real framework DocumentsProvider URI from the DEBUG APK's isolated test
+     * store. This bypasses the system picker deliberately: picker grants and
+     * third-party/cloud durability require a separate manual/device gate.
+     */
+    private fun newDisposableSafDocument(kind: String): Uri {
+        val authority = Sto08DisposableSafDocumentsProvider.AUTHORITY
+        val rootUri = DocumentsContract.buildDocumentUri(
+            authority, Sto08DisposableSafDocumentsProvider.ROOT_ID,
+        )
+        val uri = DocumentsContract.createDocument(
+            context.contentResolver, rootUri, "application/x-notebook",
+            "sto08-" + kind + "-" + id(),
+        ) ?: throw AssertionError("Debug provider could not create fixture document")
+        assertTrue("Real SAF document URI must be recognized",
+            DocumentsContract.isDocumentUri(context, uri))
+        assertEquals(authority, uri.authority)
+        return uri
+    }
+
+    private fun disposableProviderSize(uri: Uri): Long =
+        context.contentResolver.query(
+            uri, arrayOf(DocumentsContract.Document.COLUMN_SIZE), null, null, null,
+        )!!.use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            cursor.getLong(0)
+        }
+
+    private fun deleteDisposableSafFixture(uri: Uri) {
+        // Test-only document, rooted in the debug fixture provider. Never clean
+        // an unrecognized URI or a real user-selected document.
+        assertEquals(Sto08DisposableSafDocumentsProvider.AUTHORITY, uri.authority)
+        assertTrue(DocumentsContract.deleteDocument(context.contentResolver, uri))
+    }
+
+    @Test fun actualDebugDocumentsProviderRoundtripAndRoomReopenRetainsAllHolds() = runBlocking {
+        val source = imageBytes()
+        val (asset, original) = registerImage(source)
+        val operation = id()
+        retainReadyForUserDocument(operation)
+        val uri = newDisposableSafDocument("good")
+        try {
+            val publication = ExportHoldAdmissionComposition.safPublicationForRoom(
+                root, db, stageLimits,
+            )
+            val outcome = publication.publishToSelectedSafDocument(operation, context, uri)
+            assertTrue(outcome is
+                ExportSafPublicationCoordinator.Result.ExternalBytesObservedUntrusted)
+            val archived = File(
+                root, "retained-private-export-archives/" + operation + ".notebook",
+            ).readBytes()
+            val returned = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+            assertArrayEquals(archived, returned)
+            assertEquals(archived.size.toLong(), disposableProviderSize(uri))
+            db.close()
+            db = AppDatabaseProvider.openIsolated(context, name)
+            val journal = ExportExternalAttemptJournal(db, stageLimits).inspectReadOnly(operation)
+            assertTrue(journal is ExportExternalAttemptJournal.Recovery.ReadbackObservedUntrusted)
+            // A second write must fail at journal admission, leaving the real
+            // provider file intact. No provider descriptor is reopened for write.
+            assertTrue(ExportHoldAdmissionComposition.safPublicationForRoom(
+                root, db, stageLimits,
+            ).publishToSelectedSafDocument(operation, context, uri)
+                is ExportSafPublicationCoordinator.Result.Incomplete)
+            assertArrayEquals(archived,
+                context.contentResolver.openInputStream(uri)!!.use { it.readBytes() })
+            assertEquals(listOf(asset),
+                db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+            assertArrayEquals(source, original.readBytes())
+            assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+        } finally {
+            deleteDisposableSafFixture(uri)
+        }
+    }
+
+    @Test fun actualDebugDocumentsProviderWriteRefusalIsRestartAmbiguous() = runBlocking {
+        val source = imageBytes()
+        val (asset, original) = registerImage(source)
+        val operation = id()
+        retainReadyForUserDocument(operation)
+        val uri = newDisposableSafDocument("deny-write")
+        try {
+            val failure = runCatching {
+                ExportHoldAdmissionComposition.safPublicationForRoom(
+                    root, db, stageLimits,
+                ).publishToSelectedSafDocument(operation, context, uri)
+            }.exceptionOrNull()
+            assertNotNull("A real provider write failure must propagate", failure)
+            assertEquals(0L, disposableProviderSize(uri))
+            db.close()
+            db = AppDatabaseProvider.openIsolated(context, name)
+            assertTrue(ExportExternalAttemptJournal(
+                db, stageLimits,
+            ).inspectReadOnly(operation) is
+                ExportExternalAttemptJournal.Recovery.AttemptPendingUntrusted)
+            assertTrue(ExportHoldAdmissionComposition.safPublicationForRoom(
+                root, db, stageLimits,
+            ).publishToSelectedSafDocument(operation, context, uri)
+                is ExportSafPublicationCoordinator.Result.Incomplete)
+            assertEquals(0L, disposableProviderSize(uri))
+            assertEquals(listOf(asset),
+                db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+            assertArrayEquals(source, original.readBytes())
+            assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+        } finally {
+            deleteDisposableSafFixture(uri)
+        }
+    }
+
+    @Test fun actualDebugDocumentsProviderReadbackRefusalRetainsPartialOutcome() = runBlocking {
+        val source = imageBytes()
+        val (asset, original) = registerImage(source)
+        val operation = id()
+        retainReadyForUserDocument(operation)
+        val uri = newDisposableSafDocument("deny-readback")
+        try {
+            val failure = runCatching {
+                ExportHoldAdmissionComposition.safPublicationForRoom(
+                    root, db, stageLimits,
+                ).publishToSelectedSafDocument(operation, context, uri)
+            }.exceptionOrNull()
+            assertNotNull("The real provider refused independent readback", failure)
+            // The provider accepted a nonzero write but no positive evidence
+            // can be produced. Never auto-delete this ambiguous file.
+            assertTrue(disposableProviderSize(uri) > 0L)
+            db.close()
+            db = AppDatabaseProvider.openIsolated(context, name)
+            assertTrue(ExportExternalAttemptJournal(
+                db, stageLimits,
+            ).inspectReadOnly(operation) is
+                ExportExternalAttemptJournal.Recovery.AttemptPendingUntrusted)
+            assertTrue(ExportHoldAdmissionComposition.safPublicationForRoom(
+                root, db, stageLimits,
+            ).publishToSelectedSafDocument(operation, context, uri)
+                is ExportSafPublicationCoordinator.Result.Incomplete)
+            assertTrue(disposableProviderSize(uri) > 0L)
+            assertEquals(listOf(asset),
+                db.exportHoldAdmissionDao().listHolds(operation).map { it.assetId })
+            assertArrayEquals(source, original.readBytes())
+            assertEquals("UNVERIFIED", db.assetOwnershipDao().readFailClosedGateStatus())
+        } finally {
+            deleteDisposableSafFixture(uri)
+        }
     }
 
     @Test fun completeRoomBoundExternalByteRereadNeverReleasesOriginalOrHold() = runBlocking {
