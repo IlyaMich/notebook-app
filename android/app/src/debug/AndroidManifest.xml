@@ -38,6 +38,19 @@
       </intent-filter>
     </activity>
 
+    <!-- STO-08 D2I: manual-only, debug APK launcher. Runs only on emulator.
+         The user explicitly chooses a fresh system SAF destination. It is not
+         the production export entry point; no Room holds or GC are touched. -->
+    <activity
+      android:name="com.notebook.app.data.assets.Sto08D2iManualSafProbeActivity"
+      android:exported="true"
+      android:label="STO-08 D2I Disposable SAF Probe">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+
     <!-- STO-08 D2H: DEBUG ONLY Android DocumentsProvider integration fixture.
          Protected by system-only MANAGE_DOCUMENTS, not shipped in release.
          All bytes are isolated under sto08_disposable_saf_test_documents. -->
