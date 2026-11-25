@@ -33,7 +33,7 @@ An *observed* metadata row without a recognized owner remains **unclassified**. 
 
 New isolated Room v7 instrumentation class: `Sto08D3aReadOnlyOwnershipPreflightAndroidTest`.
 
-Cases: shared active+Trash owner, zero-owner observation without GC permit, registered but unowned finalized asset, missing Trash projection, extra projection, malformed canonical media, missing original, asset-count limit, changed file after initial observation, changed metadata after initial observation, failed SQLite transaction rollback, simulated GC/reclaimer contention on the exact shared lease, cancellation and lock release.
+Cases: shared active+Trash owner, zero-owner observation without GC permit, registered but unowned finalized asset, missing Trash projection, extra projection, malformed canonical media, missing original, linked/symlink original, unresolved ownership gate, asset-count limit, changed file after initial observation, changed metadata after initial observation, failed SQLite transaction rollback, simulated GC/reclaimer contention on the exact shared lease, cancellation and lock release.
 
 All cases operate only against per-test `sto08-d3a-*.sqlite` and UUID-named private fixture directories on disposable emulators. The simulated contender acquires the same lock and asserts ordering; it **does not open or unlink an original for removal**. Tests must demonstrate no deletion, no release, no gate promotion. The production physical delete path remains absent.
 
