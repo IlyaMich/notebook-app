@@ -38,7 +38,8 @@ internal class Sto08D2iManualSafProbeJournal(
         val destinationIdentitySha256: String,
     )
 
-    @Synchronized fun inspect(): Status = try {
+    @Synchronized fun inspect(): Status {
+        return try {
         val all = prefs.all
         if (all.isEmpty()) return Status.NeverAttempted
         if (all.keys != REQUIRED_KEYS) return Status.InvalidUntrusted
@@ -56,8 +57,9 @@ internal class Sto08D2iManualSafProbeJournal(
             "READBACK_ONCE_UNTRUSTED" -> Status.ReadbackObservedUntrusted(attempt)
             else -> Status.InvalidUntrusted
         }
-    } catch (_: Exception) {
-        Status.InvalidUntrusted
+        } catch (_: Exception) {
+            Status.InvalidUntrusted
+        }
     }
 
     /** Fail closed on any existing/corrupt fixture row; never overwrite. */
