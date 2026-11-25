@@ -134,6 +134,37 @@ internal object ExportHoldAdmissionComposition {
             journal = ExportExternalAttemptJournal(db, stageLimits),
         )
 
+    /**
+     * D2J-A: opt-in application Room-backed export orchestration composition.
+     * This factory does not launch export, open a picker, retain URI grants,
+     * recognize provider durability, release a hold, or enable GC.
+     * Caller must explicitly review/provide every export/resource limit.
+     */
+    fun roomBoundHandoffForApplication(
+        context: Context,
+        snapshotLimits: SnapshotLimits,
+        copyLimits: ExportCopyAdmissionLimits,
+        stageLimits: ExportPrivateStageLimits,
+    ): ExportRoomBoundHandoffCoordinator {
+        val app = context.applicationContext
+        return roomBoundHandoffForRoom(
+            app.filesDir, AppDatabaseProvider.get(app),
+            snapshotLimits, copyLimits, stageLimits,
+        )
+    }
+
+    /** Test-only composition through isolated Room/private-file roots. */
+    internal fun roomBoundHandoffForRoom(
+        privateFilesDir: File,
+        db: AppDatabase,
+        snapshotLimits: SnapshotLimits,
+        copyLimits: ExportCopyAdmissionLimits,
+        stageLimits: ExportPrivateStageLimits,
+    ): ExportRoomBoundHandoffCoordinator =
+        ExportRoomBoundHandoffCoordinator(
+            privateFilesDir, db, snapshotLimits, copyLimits, stageLimits,
+        )
+
     /** Allows isolated Room verification without accessing the application's library.sqlite. */
     internal fun forRoom(privateFilesDir: File, db: AppDatabase): ExportAtomicHoldAdmission {
         val coordinator = AssetAcquisitionLeaseCoordinator(privateFilesDir)
