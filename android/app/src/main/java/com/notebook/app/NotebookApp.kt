@@ -24,6 +24,11 @@ import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
+import com.notebook.app.data.assets.BoundedImageDecodePolicy
+import com.notebook.app.data.assets.ExportNoteHistoryReader
+import com.notebook.app.data.assets.ExportNoteHistoryReport
+import com.notebook.app.data.assets.ExportPrivateStageLimits
+import com.notebook.app.data.local.AppDatabaseProvider
 import com.notebook.app.data.library.impl.LibraryRepositoryFactory
 import com.notebook.app.ui.editor.NoteEditorSessionViewModel
 import com.notebook.app.ui.screens.LibraryHierarchySidebar
@@ -62,6 +67,32 @@ fun NotebookApp(
     val lifecycle = remember(repositories) {
         repositories.noteLifecycle()
     }
+    // D2J-B: production editor can display APP-LOCAL historic evidence only.
+    // When navigation tests inject isolated repositories, never silently read
+    // the unrelated production library.sqlite from the UI.
+    val exportHistoryReader: (suspend (String) -> ExportNoteHistoryReport)? =
+        remember(context, repositoryOverride) {
+            if (repositoryOverride != null) {
+                null
+            } else {
+                // Conservative maximum supported journal bounds for READING,
+                // not quotas for starting new exports or retention release.
+                val reader = ExportNoteHistoryReader(
+                    AppDatabaseProvider.get(context),
+                    ExportPrivateStageLimits(
+                        maxAssets = 64,
+                        maxAssetBytes = BoundedImageDecodePolicy.MAX_ENCODED_BYTES,
+                        maxTotalAssetBytes = 64L * 1024L * 1024L,
+                        maxMetadataBytes = 8L * 1024L * 1024L,
+                        maxExistingStages = 1024,
+                    ),
+                )
+                val lookup: suspend (String) -> ExportNoteHistoryReport = { id ->
+                    reader.inspect(id)
+                }
+                lookup
+            }
+        }
     val backStack = rememberNavBackStack(LibraryRoute)
     val sidebarExpansionState =
         rememberLibrarySidebarExpansionState()
@@ -206,6 +237,7 @@ fun NotebookApp(
                     documentRepository = repositories.documents,
                     sessionViewModel = editorViewModel,
                     navigationBackRequests = editorBackRequests,
+                    exportHistoryReader = exportHistoryReader,
                     onBack = {
                         // Never pop another destination accidentally.
                         if (backStack.lastOrNull() == route) {

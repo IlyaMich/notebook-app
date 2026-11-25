@@ -13,6 +13,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.notebook.app.data.assets.ExportNoteHistoryReport
 import com.notebook.app.data.content.model.DocumentEdit
 import com.notebook.app.data.content.model.StoredNoteContent
 import com.notebook.app.data.content.repository.DocumentRepository
@@ -61,6 +62,7 @@ fun NoteEditorScreen(
     sessionViewModel: NoteEditorSessionViewModel,
     navigationBackRequests: Int,
     onBack: () -> Unit,
+    exportHistoryReader: (suspend (String) -> ExportNoteHistoryReport)? = null,
 ) {
     val scope = rememberCoroutineScope()
 
@@ -86,6 +88,7 @@ fun NoteEditorScreen(
     var showLeaveConfirmation by remember(noteId) {
         mutableStateOf(false)
     }
+    var showExportHistory by remember(noteId) { mutableStateOf(false) }
     var fingerWritingPreview by rememberSaveable(noteId) {
         mutableStateOf(false)
     }
@@ -401,6 +404,14 @@ fun NoteEditorScreen(
         )
     }
 
+    if (showExportHistory && exportHistoryReader != null) {
+        ExportNoteHistoryDialog(
+            noteId = noteId,
+            readHistory = exportHistoryReader,
+            onDismiss = { showExportHistory = false },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -419,6 +430,13 @@ fun NoteEditorScreen(
                 navigationIcon = {
                     TextButton(onClick = { handleBack() }) {
                         Text("Back")
+                    }
+                },
+                actions = {
+                    if (exportHistoryReader != null) {
+                        TextButton(onClick = { showExportHistory = true }) {
+                            Text("Export history")
+                        }
                     }
                 },
             )
